@@ -158,17 +158,59 @@ def test_month_index_and_rel_storey(live: Engine) -> None:
         WHERE month_index <> (extract(year FROM month)::int - 1990) * 12
                              + extract(month FROM month)::int - 1
            OR month_index < 0
-           OR rel_storey <= 0 OR rel_storey > 1
-           OR (rel_storey IS NULL) <> (geocode_status IS NULL)
+           OR rel_storey IS NULL OR rel_storey <= 0 OR rel_storey > 1
+           OR storey_lo > block_max_floor
         """,
     )
     assert bad == 0
+
+
+def test_property_info_only_describes_current_generation(live: Engine) -> None:
+    assert (
+        scalar(
+            live,
+            "SELECT count(*) FROM marts.block_generations "
+            "WHERE block_info_source = 'hdb_property_info' AND NOT is_current",
+        )
+        == 0
+    )
+    # every sale belongs to exactly one generation of its address
+    assert (
+        scalar(
+            live,
+            """
+            SELECT count(*) FROM staging.hdb_resale AS r
+            WHERE (
+                SELECT count(*) FROM marts.block_generations AS g
+                WHERE g.address_key = r.address_key
+                  AND r.lease_commence_year BETWEEN g.lease_year_from AND g.lease_year_to
+            ) <> 1
+            """,
+        )
+        == 0
+    )
+
+
+def test_rebuilt_block_keeps_generations_apart(live: Engine) -> None:
+    """21 TEBAN GDNS RD: a 1978 block (15 storeys, sold 1990-1999) was replaced by a
+    40-storey block completed in 2012 (lease 2013) under the same number."""
+    with live.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT lease_commence_year, block_max_floor, block_year_completed "
+                "FROM marts.resale_features WHERE address_key = '21 TEBAN GDNS RD' ORDER BY 1"
+            )
+        ).all()
+    if not rows:
+        pytest.skip("21 TEBAN GDNS RD not in the data")
+    assert [tuple(r) for r in rows] == [(1978, 15, 1978), (2013, 40, 2012)]
 
 
 @pytest.mark.parametrize(
     ("table", "column", "method"),
     [
         ("block_features", "geom", "gist"),
+        ("block_generations", "address_key, generation", "btree"),
         ("resale_features", "month", "btree"),
         ("resale_features", "town", "btree"),
         ("resale_features", "address_key", "btree"),

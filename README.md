@@ -153,7 +153,10 @@ indexes. Schools have no coordinates in the source; they are geocoded in Phase 3
 
 ## Spatial features
 
-`make features` runs `pipeline/sql/2*.sql` to build two tables in `marts`:
+`make features` runs `pipeline/sql/2*.sql` to build three tables in `marts`:
+
+- `marts.block_generations`: one row per building generation at an address (see "Block
+  facts" below), with `block_max_floor`, `block_year_completed` and `block_info_source`.
 
 - `marts.block_features`: one row per located block.
   - Columns: `lat`, `lon`, `planning_area`, `region`, `dist_mrt_m`, `nearest_mrt_name`,
@@ -164,8 +167,10 @@ indexes. Schools have no coordinates in the source; they are geocoded in Phase 3
     `block_info_source`.
   - Every column is NOT NULL, so a missing feature fails the build.
 - `marts.resale_features`: one row per transaction. It has the staging columns plus the block
-  features, `month_index` (months since January 1990) and `rel_storey` (storey over the
-  block's top floor, capped at 1).
+  features, `block_generation`, `month_index` (months since January 1990) and `rel_storey`
+  (storey over the block's top floor, capped at 1). Block facts and `rel_storey` come from the
+  sale's own building generation, so they are filled for every sale, including the few on
+  blocks that could not be located.
 
 Choices worth knowing:
 
@@ -174,16 +179,19 @@ Choices worth knowing:
   the LRT station's name, and they are included. Stand-alone LRT stations are not.
 - **Hawker centres.** Those still under construction are excluded.
 - **Parks.** Distances are to the park edge, so a block inside a park gets 0.
-- **Block facts.** These come from HDB property information when it describes the sold block.
-  Some demolished blocks' numbers were reused for new non-residential structures, so a record
-  is only used if it is residential and completed no later than the block's first resale.
-  Otherwise the highest storey sold and the earliest lease start year are used
-  (`block_info_source = 'transactions'`).
+- **Block facts.** A demolished block's number is sometimes reused for a new building: 21
+  Teban Gardens Road was a 15-storey block from 1978 and is now a 40-storey block completed
+  in 2012. Sales at an address are grouped into generations by lease start year (a jump of
+  more than 3 years starts a new one). HDB property information describes today's building,
+  so it is used only for the latest generation, and only if it is residential and completed no
+  later than that generation's first resale. Otherwise the highest storey sold and the
+  earliest lease start year are used (`block_info_source = 'transactions'`).
 - **Amenities are today's.** A station or hawker centre that opened in 2020 also counts for a
   1995 sale.
 
-`uv run python -m pipeline.geocode.spot_check` compares five blocks' MRT distances with
-OneMap's nearest-MRT service and passes within 75 m. OneMap measures to a single station
+`uv run python -m pipeline.geocode.spot_check` compares five blocks' stored `dist_mrt_m` and
+`nearest_mrt_name` with OneMap's nearest-MRT service. A block passes when the station matches
+and the distances differ by at most 75 m. OneMap measures to a single station
 point, which lies up to about 60 m from the exits these features use. It needs OneMap
 credentials.
 

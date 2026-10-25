@@ -5,6 +5,79 @@
 -- Amenity data is a current snapshot: an MRT line or hawker centre that opened in 2020 also
 -- counts for a 1995 sale.
 
+-- Building generations: a demolished block's number can be reused for a new building at the
+-- same address (e.g. 21 TEBAN GDNS RD: a 1978 block sold 1990-1999, a 2013 block sold from
+-- 2016). Sales are grouped by lease start year; a jump of more than 3 years starts a new
+-- generation. HDB property information describes the building standing today, so it is only
+-- used for the current generation, and only when it is residential and completed no later than
+-- that generation's first sale (otherwise the number was reused for something else, e.g. a
+-- 2017 non-residential building at an address with resales from 1990). Other generations take
+-- the highest storey sold and their earliest lease start year from their own sales.
+
+DROP TABLE IF EXISTS marts.block_generations;
+
+CREATE TABLE marts.block_generations AS
+WITH lease_years AS (
+    SELECT address_key,
+           lease_commence_year AS lease_year,
+           count(*) AS n_sales,
+           max(storey_hi) AS max_storey_seen,
+           min(extract(year FROM month))::integer AS first_sale_year
+    FROM staging.hdb_resale
+    GROUP BY address_key, lease_commence_year
+),
+numbered AS (
+    SELECT *,
+           sum(starts_generation) OVER (PARTITION BY address_key ORDER BY lease_year) AS generation
+    FROM (
+        SELECT *,
+               CASE
+                   WHEN lease_year - lag(lease_year) OVER (
+                       PARTITION BY address_key ORDER BY lease_year
+                   ) > 3 THEN 1
+                   ELSE 0
+               END AS starts_generation
+        FROM lease_years
+    ) AS flagged
+),
+generations AS (
+    SELECT address_key,
+           generation::integer AS generation,
+           min(lease_year) AS lease_year_from,
+           max(lease_year) AS lease_year_to,
+           sum(n_sales)::integer AS n_sales,
+           max(max_storey_seen) AS max_storey_seen,
+           min(first_sale_year) AS first_sale_year,
+           generation = max(generation) OVER (PARTITION BY address_key) AS is_current
+    FROM numbered
+    GROUP BY address_key, generation
+)
+SELECT
+    g.address_key,
+    g.generation,
+    g.lease_year_from,
+    g.lease_year_to,
+    g.n_sales,
+    g.is_current,
+    coalesce(bi.max_floor_lvl, g.max_storey_seen) AS block_max_floor,
+    coalesce(bi.year_completed, g.lease_year_from) AS block_year_completed,
+    CASE WHEN bi.address_key IS NULL THEN 'transactions' ELSE 'hdb_property_info' END
+        AS block_info_source
+FROM generations AS g
+LEFT JOIN staging.hdb_block_info AS bi
+    ON bi.address_key = g.address_key
+   AND g.is_current
+   AND bi.is_residential
+   AND bi.max_floor_lvl IS NOT NULL
+   AND bi.year_completed <= g.first_sale_year;
+
+ALTER TABLE marts.block_generations
+    ADD PRIMARY KEY (address_key, generation),
+    ALTER COLUMN block_max_floor SET NOT NULL,
+    ALTER COLUMN block_year_completed SET NOT NULL;
+
+-- One row per located block. Block facts are those of the current generation.
+
 DROP TABLE IF EXISTS marts.block_features;
 
 CREATE TABLE marts.block_features AS
@@ -14,26 +87,6 @@ WITH blocks AS (
     FROM staging.geocode_cache AS c
     WHERE c.status IN ('ok', 'fallback', 'override', 'approx')
       AND EXISTS (SELECT 1 FROM staging.hdb_resale AS r WHERE r.address_key = c.address_key)
-),
-txn_block AS (
-    -- Fallbacks for blocks HDB property information does not describe (mostly demolished
-    -- blocks, see block_info below).
-    SELECT address_key,
-           max(storey_hi) AS max_storey_seen,
-           min(lease_commence_year) AS first_lease_year,
-           min(extract(year FROM month))::integer AS first_sale_year
-    FROM staging.hdb_resale
-    GROUP BY address_key
-),
-block_info AS (
-    -- Property information describes the building standing today. Some demolished blocks'
-    -- numbers were reused for a new structure (e.g. a 2017 non-residential building at an
-    -- address with resales from 1990), so only trust a residential record completed no later
-    -- than the block's first resale.
-    SELECT bi.address_key, bi.max_floor_lvl, bi.year_completed
-    FROM staging.hdb_block_info AS bi
-    JOIN txn_block AS tb USING (address_key)
-    WHERE bi.is_residential AND bi.year_completed <= tb.first_sale_year
 ),
 cbd AS (
     -- The spec's CBD reference point: Raffles Place MRT, as the centroid of its exits.
@@ -65,17 +118,12 @@ SELECT
     hawker.dist_m AS dist_hawker_m,
     park.dist_m AS dist_park_m,
     ST_Distance(b.geom, cbd.geom) AS dist_cbd_m,
-    coalesce(bi.max_floor_lvl, tb.max_storey_seen) AS block_max_floor,
-    coalesce(bi.year_completed, tb.first_lease_year) AS block_year_completed,
-    CASE
-        WHEN bi.max_floor_lvl IS NOT NULL AND bi.year_completed IS NOT NULL
-            THEN 'hdb_property_info'
-        ELSE 'transactions'
-    END AS block_info_source
+    bg.block_max_floor,
+    bg.block_year_completed,
+    bg.block_info_source
 FROM blocks AS b
 CROSS JOIN cbd
-JOIN txn_block AS tb USING (address_key)
-LEFT JOIN block_info AS bi USING (address_key)
+JOIN marts.block_generations AS bg ON bg.address_key = b.address_key AND bg.is_current
 LEFT JOIN LATERAL (
     SELECT p.planning_area, p.region
     FROM staging.planning_areas AS p

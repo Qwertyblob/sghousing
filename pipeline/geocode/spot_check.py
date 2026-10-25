@@ -1,9 +1,9 @@
 """`python -m pipeline.geocode.spot_check`: compare MRT distances with OneMap's own.
 
 For a few known blocks, OneMap's nearest-MRT service gives the nearest stations as points.
-The check passes when our nearest station (by exit) is OneMap's nearest MRT station and our
-distance to that station (centroid of its exits) is within TOLERANCE_M of OneMap's station
-point. `dist_mrt_m` itself is measured to the nearest exit, so it is reported alongside.
+The check passes when the stored `nearest_mrt_name` is OneMap's nearest MRT station and the
+stored `dist_mrt_m` (to the nearest exit) is within TOLERANCE_M of OneMap's distance to that
+station's point. Our distance to the station's exit centroid is reported for diagnosis only.
 """
 
 from __future__ import annotations
@@ -50,8 +50,7 @@ class SpotCheck:
         return (
             self.onemap_station == self.our_station
             and self.onemap_m is not None
-            and self.our_station_m is not None
-            and abs(self.our_station_m - self.onemap_m) <= TOLERANCE_M
+            and abs(self.our_exit_m - self.onemap_m) <= TOLERANCE_M
         )
 
 
@@ -122,12 +121,12 @@ def main() -> int:
         return 1
     for r in results:
         logger.info(
-            "%-24s %s  ours: %s (%s m to station, %.0f m to nearest exit)  OneMap: %s (%s m)",
+            "%-24s %s  ours: %s (dist_mrt_m %.0f m; %s m to exit centroid)  OneMap: %s (%s m)",
             r.address_key,
             "PASS" if r.passed else "FAIL",
             r.our_station,
-            f"{r.our_station_m:.0f}" if r.our_station_m is not None else "-",
             r.our_exit_m,
+            f"{r.our_station_m:.0f}" if r.our_station_m is not None else "-",
             r.onemap_station,
             f"{r.onemap_m:.0f}" if r.onemap_m is not None else "-",
         )

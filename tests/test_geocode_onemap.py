@@ -28,6 +28,7 @@ from pipeline.geocode.onemap import (
     match_postal,
 )
 from pipeline.geocode.run import Address, geocode_one
+from pipeline.geocode.spot_check import SpotCheck
 
 PASSWORD = "s3cret-pw"
 
@@ -403,3 +404,34 @@ def test_nearest_mrt_stations_refreshes_token_on_in_body_auth_error(h: Harness) 
     ]
     assert h.client.nearest_mrt_stations(1.4, 103.9, 500) == []
     assert h.paths()[TOKEN_PATH] == 2
+
+
+# --- spot check pass rule -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("our_exit_m", "onemap_station", "onemap_m", "our_station_m", "passed"),
+    [
+        (934.0, "ANG MO KIO MRT STATION", 991.0, 963.0, True),
+        # the stored distance is what is validated, not the exit-centroid diagnostic
+        (500.0, "ANG MO KIO MRT STATION", 991.0, 990.0, False),
+        (934.0, "YIO CHU KANG MRT STATION", 991.0, 963.0, False),
+        (934.0, None, None, None, False),
+    ],
+)
+def test_spot_check_validates_stored_distance(
+    our_exit_m: float,
+    onemap_station: str | None,
+    onemap_m: float | None,
+    our_station_m: float | None,
+    passed: bool,
+) -> None:
+    check = SpotCheck(
+        "406 ANG MO KIO AVE 10",
+        "ANG MO KIO MRT STATION",
+        our_exit_m,
+        onemap_station,
+        onemap_m,
+        our_station_m,
+    )
+    assert check.passed is passed
