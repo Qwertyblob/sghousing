@@ -5,7 +5,7 @@ downloads official data, cleans and enriches it in Postgres + PostGIS, trains a 
 with an uncertainty range, and exports everything to a static site that runs predictions in
 the browser.
 
-> Status: **Phase 3 (geocoding)**. Later pipeline stages are stubs until their phase lands.
+> Status: **Phase 4 (spatial features)**. Later pipeline stages are stubs until their phase lands.
 
 <!-- Screenshot: added in Phase 9 -->
 
@@ -150,6 +150,42 @@ indexes. Schools have no coordinates in the source; they are geocoded in Phase 3
   automatically; use `uv run python -m pipeline.geocode --retry-failed`, or add an override.
 - **Failures** (`approx` and `failed`) are written to `reports/geocode_failures.csv`
   (not committed).
+
+## Spatial features
+
+`make features` runs `pipeline/sql/2*.sql` to build two tables in `marts`:
+
+- `marts.block_features`: one row per located block.
+  - Columns: `lat`, `lon`, `planning_area`, `region`, `dist_mrt_m`, `nearest_mrt_name`,
+    `n_mrt_exits_500m`, `n_primary_schools_1km`, `dist_nearest_primary_m`, `dist_hawker_m`,
+    `dist_park_m`, `dist_cbd_m` (to Raffles Place MRT), `block_max_floor` and
+    `block_year_completed`.
+  - It also carries `geocode_status` (`approx` means a street-centroid location) and
+    `block_info_source`.
+  - Every column is NOT NULL, so a missing feature fails the build.
+- `marts.resale_features`: one row per transaction. It has the staging columns plus the block
+  features, `month_index` (months since January 1990) and `rel_storey` (storey over the
+  block's top floor, capped at 1).
+
+Choices worth knowing:
+
+- **MRT only.** MRT distances and counts use exits that lead into an MRT station. At the
+  Punggol, Choa Chu Kang and Bukit Panjang interchanges, LTA labels some of these exits with
+  the LRT station's name, and they are included. Stand-alone LRT stations are not.
+- **Hawker centres.** Those still under construction are excluded.
+- **Parks.** Distances are to the park edge, so a block inside a park gets 0.
+- **Block facts.** These come from HDB property information when it describes the sold block.
+  Some demolished blocks' numbers were reused for new non-residential structures, so a record
+  is only used if it is residential and completed no later than the block's first resale.
+  Otherwise the highest storey sold and the earliest lease start year are used
+  (`block_info_source = 'transactions'`).
+- **Amenities are today's.** A station or hawker centre that opened in 2020 also counts for a
+  1995 sale.
+
+`uv run python -m pipeline.geocode.spot_check` compares five blocks' MRT distances with
+OneMap's nearest-MRT service and passes within 75 m. OneMap measures to a single station
+point, which lies up to about 60 m from the exits these features use. It needs OneMap
+credentials.
 
 ## Data sources and licences
 

@@ -2,18 +2,40 @@
 -- Supermarkets are intentionally absent: no current location dataset exists on data.gov.sg.
 
 -- MRT and LRT station exits.
+-- `serves_mrt`: the exit leads into an MRT station. At integrated interchanges (Punggol,
+-- Choa Chu Kang, Bukit Panjang) some exits are labelled with the LRT station's name, so an
+-- LRT-labelled exit counts when an MRT station has the same base name.
 DROP TABLE IF EXISTS staging.mrt_exits;
 CREATE TABLE staging.mrt_exits AS
+WITH exits AS (
+    SELECT
+        feature_index AS exit_id,
+        upper(staging.norm_text(properties ->> 'STATION_NA')) AS station_name,
+        staging.norm_text(properties ->> 'EXIT_CODE') AS exit_code,
+        staging.geojson_to_svy21(geometry_geojson)::geometry(Point, 3414) AS geom
+    FROM raw.ref_mrt_exits
+),
+named AS (
+    SELECT
+        exit_id,
+        station_name,
+        regexp_replace(station_name, ' (MRT|LRT) STATION$', '') AS station_base,
+        exit_code,
+        CASE WHEN station_name LIKE '% LRT STATION' THEN 'LRT' ELSE 'MRT' END AS rail_type,
+        geom
+    FROM exits
+)
 SELECT
-    feature_index AS exit_id,
-    upper(staging.norm_text(properties ->> 'STATION_NA')) AS station_name,
-    staging.norm_text(properties ->> 'EXIT_CODE') AS exit_code,
-    CASE
-        WHEN properties ->> 'STATION_NA' ILIKE '%LRT STATION%' THEN 'LRT'
-        ELSE 'MRT'
-    END AS rail_type,
-    staging.geojson_to_svy21(geometry_geojson)::geometry(Point, 3414) AS geom
-FROM raw.ref_mrt_exits;
+    n.exit_id,
+    n.station_name,
+    n.station_base,
+    n.exit_code,
+    n.rail_type,
+    n.rail_type = 'MRT' OR EXISTS (
+        SELECT 1 FROM named AS m WHERE m.station_base = n.station_base AND m.rail_type = 'MRT'
+    ) AS serves_mrt,
+    n.geom
+FROM named AS n;
 ALTER TABLE staging.mrt_exits
     ADD PRIMARY KEY (exit_id),
     ALTER COLUMN station_name SET NOT NULL,

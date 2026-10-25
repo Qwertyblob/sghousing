@@ -7,6 +7,8 @@ Endpoints, from the official docs at https://www.onemap.gov.sg/apidocs/:
 - `GET /api/common/elastic/search?searchVal=...&returnGeom=Y&getAddrDetails=Y&pageNum=1`
   with header `Authorization: <access_token>` (no scheme prefix). Results carry `BLK_NO`,
   `ROAD_NAME`, `POSTAL`, `LATITUDE` and `LONGITUDE` as strings.
+- `GET /api/public/nearbysvc/getNearestMrtStops?latitude=..&longitude=..&radius_in_meters=..`
+  returns a JSON list of stations with `id`, `name`, `lat`, `lon` and `road`.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ ONEMAP_HOST = "www.onemap.gov.sg"
 BASE_URL = f"https://{ONEMAP_HOST}"
 TOKEN_PATH = "/api/auth/post/getToken"
 SEARCH_PATH = "/api/common/elastic/search"
+NEAREST_MRT_PATH = "/api/public/nearbysvc/getNearestMrtStops"
 REGISTER_URL = f"{BASE_URL}/apidocs/register"
 
 REQUEST_TIMEOUT_S = 30.0
@@ -190,11 +193,15 @@ class _Reply:
     content: bytes
 
 
-def _json_object(reply: _Reply, what: str) -> dict[str, Any]:
+def _json(reply: _Reply, what: str) -> Any:
     try:
-        body = json.loads(reply.content)
+        return json.loads(reply.content)
     except ValueError as exc:
         raise OneMapError(f"{what}: response is not JSON") from exc
+
+
+def _json_object(reply: _Reply, what: str) -> dict[str, Any]:
+    body = _json(reply, what)
     if not isinstance(body, dict):
         raise OneMapError(f"{what}: expected a JSON object")
     return body
@@ -303,33 +310,26 @@ class OneMapClient:
         )
         return token
 
-    def search(self, query: str) -> dict[str, Any]:
-        """Return the first page of OneMap search results for `query`."""
+    def _authed_get(self, kind: str, path: str, params: dict[str, str], what: str) -> Any:
+        """GET with the access token; a rejected token (HTTP 401/403, or an in-body token
+        error with HTTP 200) is replaced once. Returns the parsed JSON body."""
         policy = RetryPolicy.starting_now(
             SEARCH_MAX_ATTEMPTS, SEARCH_DEADLINE_S, self._sleep, self._clock
         )
-        params = {"searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": "1"}
 
-        what = f"search {query!r}"
-
-        def attempt() -> dict[str, Any]:
+        def attempt() -> Any:
             for refreshed in (False, True):
                 token = self._access_token(policy)
                 reply = self._send(
-                    "search",
-                    "GET",
-                    SEARCH_PATH,
-                    policy,
-                    params=params,
-                    headers={"Authorization": token},
+                    kind, "GET", path, policy, params=params, headers={"Authorization": token}
                 )
                 if reply.status_code in (401, 403):
                     problem = f"HTTP {reply.status_code}"
                 elif reply.status_code != 200:
                     raise OneMapError(f"{what}: unexpected HTTP {reply.status_code}")
                 else:
-                    body = _json_object(reply, what)
-                    if not _is_auth_error(body.get("error")):
+                    body = _json(reply, what)
+                    if not (isinstance(body, dict) and _is_auth_error(body.get("error"))):
                         return body
                     problem = repr(body["error"])
                 if refreshed:
@@ -338,9 +338,32 @@ class OneMapClient:
 
             raise AssertionError("unreachable")
 
-        body = retrying(attempt, policy, what=f"OneMap {what}")
+        return retrying(attempt, policy, what=f"OneMap {what}")
+
+    def search(self, query: str) -> dict[str, Any]:
+        """Return the first page of OneMap search results for `query`."""
+        what = f"search {query!r}"
+        params = {"searchVal": query, "returnGeom": "Y", "getAddrDetails": "Y", "pageNum": "1"}
+        body = self._authed_get("search", SEARCH_PATH, params, what)
+        if not isinstance(body, dict):
+            raise OneMapError(f"{what}: expected a JSON object")
         if "error" in body:
             raise OneMapError(f"{what}: OneMap returned error {body['error']!r}")
         if not isinstance(body.get("found"), int) or not isinstance(body.get("results"), list):
             raise OneMapError(f"{what}: response lacks 'found' or 'results'")
+        return body
+
+    def nearest_mrt_stations(self, lat: float, lon: float, radius_m: int) -> list[dict[str, Any]]:
+        """MRT and LRT stations within `radius_m` of a point, as OneMap lists them."""
+        what = f"nearest MRT stops at ({lat:.6f}, {lon:.6f})"
+        params = {
+            "latitude": f"{lat:.8f}",
+            "longitude": f"{lon:.8f}",
+            "radius_in_meters": str(radius_m),
+        }
+        body = self._authed_get("nearest_mrt", NEAREST_MRT_PATH, params, what)
+        if not isinstance(body, list) or not all(
+            isinstance(s, dict) and {"name", "lat", "lon"} <= s.keys() for s in body
+        ):
+            raise OneMapError(f"{what}: expected a list of stations with name, lat and lon")
         return body

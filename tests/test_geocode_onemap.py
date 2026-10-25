@@ -15,6 +15,7 @@ from pydantic import SecretStr
 from config.settings import Settings
 from pipeline.common.http import DeadlineExceededError
 from pipeline.geocode.onemap import (
+    NEAREST_MRT_PATH,
     SEARCH_DEADLINE_S,
     SEARCH_PATH,
     TOKEN_PATH,
@@ -96,7 +97,7 @@ class Harness:
                     "expiry_timestamp": str(self.token_expiry),
                 },
             )
-        assert request.url.path == SEARCH_PATH
+        assert request.url.path in (SEARCH_PATH, NEAREST_MRT_PATH)
         return self.search_responses.pop(0)
 
     def paths(self) -> Counter[str]:
@@ -368,3 +369,37 @@ def test_geocode_one_postal() -> None:
     s = FakeSearcher({"529366": body(result("1", "X ROAD", postal="529366"))})
     row = geocode_one(s, Address("POSTAL 529366", postal="529366"))
     assert (row.status, row.postal, row.query_used) == ("ok", "529366", "529366")
+
+
+# --- nearest MRT stations -----------------------------------------------------------------
+
+
+def test_nearest_mrt_stations_request_and_parse(h: Harness) -> None:
+    stations = [{"id": "NE17", "name": "PUNGGOL MRT STATION", "lat": 1.40, "lon": 103.90}]
+    h.search_responses.append(httpx.Response(200, json=stations))
+    assert h.client.nearest_mrt_stations(1.4044693, 103.9008362, 1000) == stations
+    req = h.requests[-1]
+    assert req.url.path == NEAREST_MRT_PATH
+    assert req.headers["Authorization"] == "tok-1"
+    assert dict(req.url.params) == {
+        "latitude": "1.40446930",
+        "longitude": "103.90083620",
+        "radius_in_meters": "1000",
+    }
+    assert h.client.request_counts["nearest_mrt"] == 1
+
+
+@pytest.mark.parametrize("payload", [{"found": 0}, [{"name": "X"}], ["not a station"]])
+def test_nearest_mrt_stations_rejects_unexpected_shapes(h: Harness, payload: object) -> None:
+    h.search_responses.append(httpx.Response(200, json=payload))
+    with pytest.raises(OneMapError, match="expected a list of stations"):
+        h.client.nearest_mrt_stations(1.4, 103.9, 500)
+
+
+def test_nearest_mrt_stations_refreshes_token_on_in_body_auth_error(h: Harness) -> None:
+    h.search_responses += [
+        httpx.Response(200, json={"error": AUTH_ERROR}),
+        httpx.Response(200, json=[]),
+    ]
+    assert h.client.nearest_mrt_stations(1.4, 103.9, 500) == []
+    assert h.paths()[TOKEN_PATH] == 2
