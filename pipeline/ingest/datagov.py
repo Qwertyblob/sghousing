@@ -35,6 +35,8 @@ logger = logging.getLogger(__name__)
 METADATA_BASE = "https://api-production.data.gov.sg/v2/public/api"
 DOWNLOAD_BASE = "https://api-open.data.gov.sg/v1/public/api"
 FORMAT_EXTENSIONS = {"CSV": "csv", "GEOJSON": "geojson"}
+API_TIMEOUT_S = 30.0  # per request, further capped by the operation deadline
+DOWNLOAD_TIMEOUT_S = 60.0
 
 
 class DataGovError(RuntimeError):
@@ -57,7 +59,7 @@ class DataGovClient:
         *,
         raw_dir: Path,
         api_key: str | None = None,
-        max_attempts: int = 8,
+        max_attempts: int = 20,
         timeout_s: float = 600.0,
         api_transport: httpx.BaseTransport | None = None,
         download_transport: httpx.BaseTransport | None = None,
@@ -106,9 +108,10 @@ class DataGovClient:
     def _policy(self) -> RetryPolicy:
         return RetryPolicy.starting_now(self.max_attempts, self.timeout_s, self._sleep, self._clock)
 
-    def _api_once(self, url: str, kind: str) -> dict[str, Any]:
+    def _api_once(self, url: str, kind: str, policy: RetryPolicy) -> dict[str, Any]:
+        policy.charge()
         self.request_counts[kind] += 1
-        response = self._api.get(url)
+        response = self._api.get(url, timeout=policy.timeout(API_TIMEOUT_S))
         if response.is_redirect or 300 <= response.status_code < 400:
             raise UnsafeRequestError(f"API redirect refused ({response.status_code}) for {kind}")
         raise_for_retryable(response)
@@ -119,7 +122,8 @@ class DataGovClient:
         return body.get("data") or {}
 
     def _api_data(self, url: str, kind: str, policy: RetryPolicy | None = None) -> dict[str, Any]:
-        return retrying(lambda: self._api_once(url, kind), policy or self._policy(), what=kind)
+        policy = policy or self._policy()
+        return retrying(lambda: self._api_once(url, kind, policy), policy, what=kind)
 
     def get_collection_metadata(self, collection_id: str) -> CollectionMetadata:
         """Metadata for a collection, including its child dataset IDs."""
@@ -131,25 +135,33 @@ class DataGovClient:
         data = self._api_data(f"{METADATA_BASE}/datasets/{dataset_id}/metadata", "metadata")
         return DatasetMetadata.from_api(data)
 
-    def _poll_once(self, dataset_id: str) -> str:
-        data = self._api_once(f"{DOWNLOAD_BASE}/datasets/{dataset_id}/poll-download", "poll")
+    def _poll_once(self, dataset_id: str, policy: RetryPolicy) -> str:
+        data = self._api_once(
+            f"{DOWNLOAD_BASE}/datasets/{dataset_id}/poll-download", "poll", policy
+        )
         url = data.get("url")
         if not url:
             raise NotReadyError(f"download not ready (status={data.get('status')!r})")
         return url
 
-    def _stream_to_part(self, url: str, directory: Path) -> tuple[Path, str, int]:
+    def _stream_to_part(
+        self, url: str, directory: Path, policy: RetryPolicy
+    ) -> tuple[Path, str, int]:
         directory.mkdir(parents=True, exist_ok=True)
         part = directory / f".{uuid.uuid4().hex}.part"
         digest = hashlib.sha256()
         nbytes = 0
+        policy.charge()
         self.request_counts["storage"] += 1
         try:
-            with self._download.stream("GET", url) as response:
+            timeout = policy.timeout(DOWNLOAD_TIMEOUT_S)
+            with self._download.stream("GET", url, timeout=timeout) as response:
                 raise_for_retryable(response)
                 response.raise_for_status()
                 with part.open("wb") as f:
-                    for chunk in response.iter_bytes(1 << 20):
+                    # No chunk_size: buffering to a fixed size would delay the deadline check.
+                    for chunk in response.iter_bytes():
+                        policy.check_deadline()
                         f.write(chunk)
                         digest.update(chunk)
                         nbytes += len(chunk)
@@ -169,9 +181,9 @@ class DataGovClient:
             self._api_data(
                 f"{DOWNLOAD_BASE}/datasets/{dataset_id}/initiate-download", "initiate", policy
             )
-        url = retrying(lambda: self._poll_once(dataset_id), policy, what="poll")
+        url = retrying(lambda: self._poll_once(dataset_id, policy), policy, what="poll")
         logger.info("Downloading %s from %s", dataset_id, httpx.URL(url).host)
-        return self._stream_to_part(url, directory)
+        return self._stream_to_part(url, directory, policy)
 
     def download_dataset(self, dataset_id: str, source: str, *, force: bool = False) -> Snapshot:
         """Return the current snapshot of a dataset, downloading it if needed.

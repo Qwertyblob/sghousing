@@ -141,3 +141,17 @@ def test_geojson_must_be_feature_collection(tmp_path: Path) -> None:
     path.write_text('{"type": "Feature", "properties": {}, "geometry": null}')
     with pytest.raises(ParseError, match="FeatureCollection"):
         list(read_geojson_features(path))
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'a,b\n1,"unterminated\n2,3\n',  # lenient csv merges this into one valid-looking record
+        'a,b\n"x"y,2\n',  # text after a closing quote
+    ],
+)
+def test_malformed_quoting_raises(tmp_path: Path, body: str) -> None:
+    path = tmp_path / "malformed.csv"
+    path.write_text(body, encoding="utf-8", newline="")
+    with pytest.raises(ParseError, match="malformed CSV"):
+        read_all(path)

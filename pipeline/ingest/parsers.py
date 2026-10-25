@@ -46,27 +46,36 @@ def open_csv(path: Path) -> Iterator[tuple[list[str], Iterator[tuple[int, list[s
     """Open a CSV snapshot and yield `(header, records)`.
 
     `records` yields `(record_number, values)` with 1-based record numbers. Quoted fields may
-    contain commas and newlines; empty cells stay `''`. Blank lines are skipped and a record
-    with the wrong number of fields raises ParseError.
+    contain commas and newlines; empty cells stay `''`. Blank lines are skipped. Malformed
+    quoting (e.g. an unterminated quote, which a lenient reader would silently merge into the
+    following lines) and records with the wrong number of fields raise ParseError.
     """
     with path.open(encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f)
+        reader = csv.reader(f, strict=True)
         try:
             header = normalise_header(next(reader))
         except StopIteration as exc:
             raise ParseError(f"{path.name} is empty") from exc
+        except csv.Error as exc:
+            raise ParseError(f"{path.name} header: malformed CSV: {exc}") from exc
 
         def records() -> Iterator[tuple[int, list[str]]]:
             number = 0
-            for row in reader:
-                if not row:
-                    continue
-                number += 1
-                if len(row) != len(header):
-                    raise ParseError(
-                        f"{path.name} record {number}: {len(row)} fields, expected {len(header)}"
-                    )
-                yield number, row
+            try:
+                for row in reader:
+                    if not row:
+                        continue
+                    number += 1
+                    if len(row) != len(header):
+                        raise ParseError(
+                            f"{path.name} record {number}: {len(row)} fields, "
+                            f"expected {len(header)}"
+                        )
+                    yield number, row
+            except csv.Error as exc:
+                raise ParseError(
+                    f"{path.name} after record {number}: malformed CSV: {exc}"
+                ) from exc
 
         yield header, records()
 

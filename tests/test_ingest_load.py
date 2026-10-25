@@ -153,3 +153,21 @@ def test_geojson_load(engine: Engine, schema: str, make_snapshot: MakeSnapshot) 
         f'FROM "{schema}".ref_parks ORDER BY 1',
     )
     assert rows == [(0, "Alpha Park", "Point"), (1, "Beta Park", "Polygon")]
+
+
+def test_malformed_csv_does_not_replace_valid_rows(
+    engine: Engine, schema: str, make_snapshot: MakeSnapshot, tmp_path: Path
+) -> None:
+    v1 = tmp_path / "v1.csv"
+    v1.write_text("a,b\n1,2\n3,4\n")
+    load_snapshot(engine, make_snapshot(v1, "d_a"), table="t", schema=schema)
+    rows_before = fetch(engine, f'SELECT * FROM "{schema}".t ORDER BY source_row_number')
+    log_before = fetch(engine, f'SELECT * FROM "{schema}".ingestion_log ORDER BY id')
+
+    v2 = tmp_path / "v2.csv"
+    v2.write_text('a,b\n5,"unterminated\n6,7\n', newline="")
+    with pytest.raises(ParseError, match="malformed CSV"):
+        load_snapshot(engine, make_snapshot(v2, "d_a"), table="t", schema=schema)
+
+    assert fetch(engine, f'SELECT * FROM "{schema}".t ORDER BY source_row_number') == rows_before
+    assert fetch(engine, f'SELECT * FROM "{schema}".ingestion_log ORDER BY id') == log_before

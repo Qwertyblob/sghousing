@@ -41,7 +41,8 @@ class Settings(BaseSettings):
     onemap_email: str | None = None
     onemap_password: SecretStr | None = None
     geocode_requests_per_second: float = 3.0
-    datagov_max_attempts: int = Field(default=8, ge=1)
+    # Total HTTP requests allowed per operation (all retries of initiate, poll and download).
+    datagov_max_attempts: int = Field(default=20, ge=1)
     datagov_download_timeout_s: float = Field(default=600.0, gt=0)
 
     train_end: date = date(2023, 12, 1)

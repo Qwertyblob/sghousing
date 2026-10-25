@@ -16,7 +16,9 @@ from pipeline.common.http import (
     API_HOSTS,
     API_KEY_HEADER,
     USER_AGENT,
+    DeadlineExceededError,
     RetryableHTTPError,
+    RetryBudgetExhaustedError,
     UnsafeRequestError,
     make_api_client,
 )
@@ -124,7 +126,7 @@ class Harness:
         *,
         api_key: str | None = API_KEY,
         timeout_s: float = 600.0,
-        max_attempts: int = 5,
+        max_attempts: int = 10,
     ) -> None:
         self.server = server
         self.fake_clock = FakeClock()
@@ -182,17 +184,18 @@ def test_gives_up_after_max_attempts(harness: Harness) -> None:
     harness.server.script("metadata", *[httpx.Response(503)] * 10)
     with pytest.raises(RetryableHTTPError):
         harness.client.get_dataset_metadata(DATASET)
-    assert harness.server.kinds().count("metadata") == 5
+    assert harness.server.kinds().count("metadata") == harness.client.max_attempts
 
 
 def test_deadline_includes_retry_waits(tmp_path: Path) -> None:
     server = FakeServer()
     server.script("metadata", *[httpx.Response(429, headers={"Retry-After": "8"})] * 10)
     h = Harness(tmp_path, server, timeout_s=10, max_attempts=50)
-    with pytest.raises(RetryableHTTPError):
+    with pytest.raises(DeadlineExceededError):
         h.client.get_dataset_metadata(DATASET)
     assert h.fake_clock.t <= 10
     assert h.fake_clock.sleeps == [8.0, 2.0]  # second wait clipped to the deadline
+    assert h.server.kinds() == ["metadata", "metadata"]  # no request after the deadline
 
 
 @pytest.mark.parametrize("kind", ["metadata", "initiate", "poll"])
@@ -405,3 +408,58 @@ def test_damaged_cache_is_not_reused(harness: Harness, damage: str) -> None:
     assert "storage" in harness.server.kinds()
     assert repaired.sha256 == hashlib.sha256(BODY_A).hexdigest()
     assert snapshots.read_complete(repaired.path, verify_checksum=True) == repaired
+
+
+# --- deadline during requests, and one budget across nested retries -----------------------
+
+
+class SlowStream(httpx.SyncByteStream):
+    """Body whose chunks each take `seconds` of (fake) time to arrive."""
+
+    def __init__(self, clock: FakeClock, chunks: int, seconds: float) -> None:
+        self.clock, self.chunks, self.seconds = clock, chunks, seconds
+
+    def __iter__(self) -> Iterator[bytes]:
+        for _ in range(self.chunks):
+            self.clock.t += self.seconds
+            yield b"x" * 16
+
+
+def test_request_timeout_is_capped_by_deadline(tmp_path: Path) -> None:
+    server = FakeServer()
+    server.script("metadata", httpx.Response(429, headers={"Retry-After": "8"}))
+    h = Harness(tmp_path, server, timeout_s=10, max_attempts=5)
+    h.client.get_dataset_metadata(DATASET)
+    assert [r.extensions["timeout"]["read"] for _, r in server.log] == [10.0, 2.0]
+
+
+def test_slow_stream_is_stopped_at_deadline(tmp_path: Path) -> None:
+    server = FakeServer()
+    h = Harness(tmp_path, server, timeout_s=100, max_attempts=5)
+    server.script("storage", httpx.Response(200, stream=SlowStream(h.fake_clock, 10, 30)))
+    with pytest.raises(DeadlineExceededError):
+        h.download()
+    assert h.fake_clock.t <= 100 + 30  # stopped at the first chunk past the deadline
+    assert server.kinds().count("storage") == 1  # deadline errors are not retried
+    assert not list(h.dir.glob(".*.part"))
+    assert not (h.dir / snapshots.CURRENT_FILE).exists()
+
+
+def test_nested_retries_share_one_budget(tmp_path: Path) -> None:
+    server = FakeServer()
+    server.script("poll", *[httpx.Response(429)] * 100)
+    h = Harness(tmp_path, server, max_attempts=5)
+    with pytest.raises(RetryableHTTPError):
+        h.download()
+    # metadata has its own budget; initiate + polls share the download's 5 attempts
+    assert [k for k in server.kinds() if k != "metadata"] == ["initiate"] + ["poll"] * 4
+
+
+def test_repeated_stream_failures_share_one_budget(tmp_path: Path) -> None:
+    server = FakeServer()
+    server.script("storage", *[httpx.Response(200, stream=FailingStream()) for _ in range(50)])
+    h = Harness(tmp_path, server, max_attempts=7)
+    with pytest.raises((httpx.ReadError, RetryBudgetExhaustedError)):
+        h.download()
+    assert len([k for k in server.kinds() if k != "metadata"]) <= 7
+    assert not list(h.dir.glob(".*.part"))

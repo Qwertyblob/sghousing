@@ -41,6 +41,14 @@ class NotReadyError(RuntimeError):
     """A polled resource is not ready yet; retried with backoff."""
 
 
+class DeadlineExceededError(TimeoutError):
+    """The operation's overall deadline passed. Not retried."""
+
+
+class RetryBudgetExhaustedError(RuntimeError):
+    """The operation's shared attempt budget is used up. Not retried."""
+
+
 RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     RetryableHTTPError,
     NotReadyError,
@@ -105,15 +113,42 @@ def make_download_client(*, transport: httpx.BaseTransport | None = None) -> htt
 
 @dataclass
 class RetryPolicy:
-    """Attempt limit plus an absolute deadline on `clock`, shared by nested retries."""
+    """One operation's request budget and absolute deadline (on `clock`).
+
+    Shared by nested retries: every HTTP request in the operation, at any nesting level,
+    charges one attempt, so the total never exceeds `max_attempts`. Request timeouts are
+    capped at the time left, so no single request or stream outlives the deadline by more
+    than one read.
+    """
 
     max_attempts: int
     deadline: float
     sleep: Callable[[float], None] = time.sleep
     clock: Callable[[], float] = time.monotonic
+    attempts: int = 0
     _backoff: Any = field(
         default_factory=lambda: tenacity.wait_exponential_jitter(multiplier=2, max=60, jitter=1)
     )
+
+    def charge(self) -> None:
+        """Record one request attempt; refuse if the budget or deadline is spent."""
+        if self.attempts >= self.max_attempts:
+            raise RetryBudgetExhaustedError(f"used all {self.max_attempts} attempts")
+        self.check_deadline()
+        self.attempts += 1
+
+    def check_deadline(self) -> None:
+        """Raise DeadlineExceededError once the deadline has passed."""
+        if self.remaining() <= 0:
+            raise DeadlineExceededError("operation deadline exceeded")
+
+    def timeout(self, cap: float) -> httpx.Timeout:
+        """A request timeout of `cap` seconds, shortened to the time left."""
+        self.check_deadline()
+        return httpx.Timeout(min(cap, self.remaining()))
+
+    def exhausted(self) -> bool:
+        return self.attempts >= self.max_attempts or self.remaining() <= 0
 
     @classmethod
     def starting_now(
@@ -130,14 +165,16 @@ class RetryPolicy:
 
 
 def retrying[T](fn: Callable[[], T], policy: RetryPolicy, *, what: str = "request") -> T:
-    """Call `fn`, retrying retryable errors until attempts or the deadline run out.
+    """Call `fn`, retrying retryable errors until the policy's budget or deadline runs out.
 
-    Waits honour Retry-After when present, otherwise exponential backoff with jitter. Waits
-    are clipped to the remaining deadline. The last exception is re-raised on exhaustion.
+    `fn` must charge the policy for each request it makes (see `RetryPolicy.charge`), so
+    nested calls draw from one budget. Waits honour Retry-After when present, otherwise
+    exponential backoff with jitter, clipped to the remaining deadline. The last exception
+    is re-raised on exhaustion.
     """
 
     def stop(state: tenacity.RetryCallState) -> bool:
-        return state.attempt_number >= policy.max_attempts or policy.remaining() <= 0
+        return policy.exhausted()
 
     def wait(state: tenacity.RetryCallState) -> float:
         exc = state.outcome.exception() if state.outcome else None
@@ -150,9 +187,9 @@ def retrying[T](fn: Callable[[], T], policy: RetryPolicy, *, what: str = "reques
     def before_sleep(state: tenacity.RetryCallState) -> None:
         exc = state.outcome.exception() if state.outcome else None
         logger.warning(
-            "%s failed (attempt %d/%d): %s; retrying in %.1fs",
+            "%s failed (%d/%d attempts used): %s; retrying in %.1fs",
             what,
-            state.attempt_number,
+            policy.attempts,
             policy.max_attempts,
             exc,
             state.upcoming_sleep,
