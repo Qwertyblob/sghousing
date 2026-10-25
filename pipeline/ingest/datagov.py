@@ -126,6 +126,7 @@ class DataGovClient:
             for chunk in response.iter_bytes():
                 policy.check_deadline()
                 payload += chunk
+            policy.check_deadline()  # the end of the body may arrive after the last chunk
         body = json.loads(payload)
         if body.get("code") != 0:
             raise DataGovError(body.get("code"), body.get("errorMsg") or body.get("name") or "")
@@ -182,6 +183,7 @@ class DataGovClient:
                             f.write(chunk)
                             digest.update(chunk)
                             nbytes += len(chunk)
+                        policy.check_deadline()  # the end may arrive after the last chunk
                         f.flush()
                         os.fsync(f.fileno())
                     return part, digest.hexdigest(), nbytes

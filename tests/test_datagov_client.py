@@ -488,6 +488,38 @@ def test_slow_api_body_is_stopped_at_deadline(tmp_path: Path) -> None:
     assert server.kinds() == ["metadata"]
 
 
+class StallsBeforeEnd(httpx.SyncByteStream):
+    """Whole body in one prompt chunk, then the end of the response arrives late."""
+
+    def __init__(self, clock: FakeClock, payload: bytes, stall: float) -> None:
+        self.clock, self.payload, self.stall = clock, payload, stall
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield self.payload
+        self.clock.t += self.stall
+
+
+def test_api_deadline_checked_after_the_body_ends(tmp_path: Path) -> None:
+    server = FakeServer()
+    h = Harness(tmp_path, server, timeout_s=100)
+    body = {"code": 0, "data": {"datasetId": DATASET, "name": "x", "format": "CSV"}}
+    stream = StallsBeforeEnd(h.fake_clock, json.dumps(body).encode(), 101)
+    server.script("metadata", httpx.Response(200, stream=stream))
+    with pytest.raises(DeadlineExceededError):
+        h.client.get_dataset_metadata(DATASET)
+
+
+def test_download_deadline_checked_after_the_body_ends(tmp_path: Path) -> None:
+    server = FakeServer()
+    h = Harness(tmp_path, server, timeout_s=100)
+    stream = StallsBeforeEnd(h.fake_clock, BODY_A, 101)
+    server.script("storage", httpx.Response(200, stream=stream))
+    with pytest.raises(DeadlineExceededError):
+        h.download()
+    assert not list(h.dir.glob(".*.part"))
+    assert not (h.dir / snapshots.CURRENT_FILE).exists()
+
+
 def test_storage_redirect_hops_are_charged(tmp_path: Path) -> None:
     server = FakeServer()
     hop = httpx.Response(302, headers={"Location": "https://other-storage.test/next"})
