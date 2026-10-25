@@ -51,7 +51,7 @@ test: ## Run unit tests (no database needed)
 	uv run pytest
 
 test-db: ## Run database integration tests (needs `make db-up`)
-	uv run pytest -m db
+	uv run pytest -m "db and not quality"
 
 lint: ## Ruff lint + format check
 	uv run ruff check .
@@ -76,7 +76,7 @@ features: ## Build marts.block_features and marts.resale_features (PostGIS SQL)
 	uv run python -m pipeline.common.sql_runner '2*.sql'
 
 check: ## Data quality checks; writes reports/data_quality.md (needs `make features`)
-	uv run pytest -m db tests/test_data_quality.py
+	uv run pytest -m quality
 
 train: ## Train baselines and LightGBM models (Phase 7)
 	$(call not_implemented,7)

@@ -22,9 +22,24 @@ logger = logging.getLogger(__name__)
 
 Status = Literal["pass", "fail", "flag"]
 
+
+class MissingInputError(RuntimeError):
+    """A table the checks read is absent, or there are no sales to check."""
+
+
+@dataclass(frozen=True)
+class Sources:
+    """The tables the checks read. Tests point these at small fixture copies."""
+
+    resale: str = "staging.hdb_resale"
+    geocode_cache: str = "staging.geocode_cache"
+    features: str = "marts.resale_features"
+
+
 # Columns every later step relies on; a NULL in any of them fails the check.
+# Keys are `Sources` fields.
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
-    "staging.hdb_resale": (
+    "resale": (
         "txn_id",
         "month",
         "date_basis",
@@ -47,7 +62,7 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "source_dataset_id",
         "source_row_number",
     ),
-    "marts.resale_features": (
+    "features": (
         "month_index",
         "block_generation",
         "block_max_floor",
@@ -104,18 +119,26 @@ class RangeRule:
     allowed_reason: str = ""
 
 
+# HDB terrace houses in Whampoa include their land; the largest sold so far is 366.7 sqm.
+TERRACE_MAX_SQM = 400
 RANGE_RULES = (
     RangeRule(
         "floor_area_sqm between 25 and 300",
         "floor_area_sqm BETWEEN 25 AND 300",
-        allowed_sql="flat_model = 'Terrace'",
-        allowed_reason="HDB terrace houses in Whampoa include their land, up to about 370 sqm",
+        allowed_sql=(
+            "flat_model = 'Terrace' AND town = 'KALLANG/WHAMPOA' "
+            f"AND floor_area_sqm > 300 AND floor_area_sqm <= {TERRACE_MAX_SQM}"
+        ),
+        allowed_reason=(
+            "Whampoa terrace houses include their land: Terrace model in KALLANG/WHAMPOA, "
+            f"over 300 and up to {TERRACE_MAX_SQM} sqm"
+        ),
     ),
     RangeRule("resale_price above 0", "resale_price > 0"),
     RangeRule("storey_mid between 1 and 60", "storey_mid BETWEEN 1 AND 60"),
 )
 
-# A year (scaled to 12 months if partial) below this share of the previous year is flagged.
+# A year (scaled to 12 months if partial) below this share of the previous year fails.
 MIN_YEAR_RATIO = 0.5
 # Phase 3 acceptance: share of distinct addresses with a location.
 MIN_GEOCODE_COVERAGE = 0.995
@@ -178,19 +201,39 @@ def _pct(part: int, whole: int) -> str:
     return f"{part / whole:.2%}" if whole else "-"
 
 
-def check_year_counts(conn: Connection) -> CheckResult:
-    """Flag a year with less than half the previous year's sales (or no sales at all)."""
+def check_year_counts(conn: Connection, src: Sources) -> CheckResult:
+    """Fail on any month without sales, or a year with under half the previous year's sales.
+
+    Months are checked first: only with every month present is scaling a partial first or
+    last year to 12 months a fair comparison.
+    """
+    missing = (
+        conn.execute(
+            text(f"""
+            SELECT to_char(m, 'YYYY-MM')
+            FROM generate_series(
+                (SELECT min(month) FROM {src.resale}),
+                (SELECT max(month) FROM {src.resale}),
+                interval '1 month'
+            ) AS m
+            WHERE NOT EXISTS (SELECT 1 FROM {src.resale} AS r WHERE r.month = m::date)
+            ORDER BY 1
+            """)
+        )
+        .scalars()
+        .all()
+    )
     rows = conn.execute(
-        text("""
+        text(f"""
         WITH years AS (
             SELECT generate_series(
                 min(extract(year FROM month))::integer, max(extract(year FROM month))::integer
             ) AS year
-            FROM staging.hdb_resale
+            FROM {src.resale}
         )
         SELECT y.year, count(r.month) AS sales, count(DISTINCT r.month) AS months
         FROM years AS y
-        LEFT JOIN staging.hdb_resale AS r ON extract(year FROM r.month) = y.year
+        LEFT JOIN {src.resale} AS r ON extract(year FROM r.month) = y.year
         GROUP BY y.year
         ORDER BY y.year
         """)
@@ -215,17 +258,20 @@ def check_year_counts(conn: Connection) -> CheckResult:
             )
         )
         previous = per_12
-    summary = (
+    parts = [
+        f"Months with no sales: {', '.join(missing)}."
+        if missing
+        else f"Every month from {rows[0][0] if rows else '-'} on has sales.",
         f"Below half the previous year: {', '.join(map(str, flagged))}."
         if flagged
-        else f"No year below half the previous year across {len(rows)} years."
-    )
-    summary += " Partial years are scaled to 12 months before comparing."
+        else f"No year below half the previous year across {len(rows)} years.",
+        "The partial first and last years are scaled to 12 months before comparing.",
+    ]
     return CheckResult(
         "year_counts",
         "Row counts per year",
-        "fail" if flagged else "pass",
-        summary,
+        "fail" if flagged or missing else "pass",
+        " ".join(parts),
         (
             Table(
                 ("Year", "Sales", "Months", "Sales per 12 months", "vs previous year", "Flag"),
@@ -235,11 +281,12 @@ def check_year_counts(conn: Connection) -> CheckResult:
     )
 
 
-def check_required_nulls(conn: Connection) -> CheckResult:
+def check_required_nulls(conn: Connection, src: Sources) -> CheckResult:
     """Count NULLs in every required column."""
     table: list[tuple[str, ...]] = []
     bad = 0
-    for relation, columns in REQUIRED_COLUMNS.items():
+    for source, columns in REQUIRED_COLUMNS.items():
+        relation = getattr(src, source)
         select = ", ".join(f'count(*) FILTER (WHERE "{c}" IS NULL)' for c in columns)
         counts = conn.execute(text(f"SELECT {select} FROM {relation}")).one()
         for column, nulls in zip(columns, counts, strict=True):
@@ -255,7 +302,7 @@ def check_required_nulls(conn: Connection) -> CheckResult:
     )
 
 
-def check_ranges(conn: Connection) -> CheckResult:
+def check_ranges(conn: Connection, src: Sources) -> CheckResult:
     """Count values outside each valid range; known genuine exceptions are listed, not failed."""
     table: list[tuple[str, ...]] = []
     tables: list[Table] = []
@@ -267,7 +314,7 @@ def check_ranges(conn: Connection) -> CheckResult:
             text(
                 f"SELECT count(*) FILTER (WHERE NOT ({allowed})), "
                 f"count(*) FILTER (WHERE {allowed}) "
-                f"FROM staging.hdb_resale WHERE {outside}"
+                f"FROM {src.resale} WHERE {outside}"
             )
         ).one()
         failures += violations
@@ -276,7 +323,7 @@ def check_ranges(conn: Connection) -> CheckResult:
             rows = conn.execute(
                 text(
                     "SELECT to_char(month, 'YYYY-MM'), town, flat_type, flat_model, address_key, "
-                    "floor_area_sqm, resale_price FROM staging.hdb_resale "
+                    f"floor_area_sqm, resale_price FROM {src.resale} "
                     f"WHERE {outside} AND {allowed} ORDER BY month, txn_id"
                 )
             ).all()
@@ -299,13 +346,13 @@ def check_ranges(conn: Connection) -> CheckResult:
     )
 
 
-def check_known_values(conn: Connection) -> CheckResult:
+def check_known_values(conn: Connection, src: Sources) -> CheckResult:
     """Every flat type and town must come from a known list."""
     table: list[tuple[str, ...]] = []
     unknown_total = 0
     for column, known in KNOWN_VALUES.items():
         found = conn.execute(
-            text(f"SELECT {column}, count(*) FROM staging.hdb_resale GROUP BY 1 ORDER BY 1")
+            text(f"SELECT {column}, count(*) FROM {src.resale} GROUP BY 1 ORDER BY 1")
         ).all()
         unknown = [(value, n) for value, n in found if value not in known]
         unknown_total += len(unknown)
@@ -326,16 +373,16 @@ def check_known_values(conn: Connection) -> CheckResult:
     )
 
 
-def check_geocode_coverage(conn: Connection) -> CheckResult:
+def check_geocode_coverage(conn: Connection, src: Sources) -> CheckResult:
     """Share of distinct addresses with a location, and every recent sale located."""
     rows = conn.execute(
-        text("""
+        text(f"""
         SELECT coalesce(c.status, 'not attempted') AS status,
                count(DISTINCT r.address_key) AS blocks,
                count(*) AS sales,
                count(*) FILTER (WHERE r.month >= make_date(:year, 1, 1)) AS recent
-        FROM staging.hdb_resale AS r
-        LEFT JOIN staging.geocode_cache AS c USING (address_key)
+        FROM {src.resale} AS r
+        LEFT JOIN {src.geocode_cache} AS c USING (address_key)
         GROUP BY 1
         ORDER BY 2 DESC, 1
         """),
@@ -367,45 +414,90 @@ def check_geocode_coverage(conn: Connection) -> CheckResult:
     )
 
 
-def check_feature_coverage(conn: Connection) -> CheckResult:
-    """Every sale is in the feature mart, and every feature is filled where it can be."""
-    staged = conn.execute(text("SELECT count(*) FROM staging.hdb_resale")).scalar_one()
-    columns = LOCATION_FEATURES + SALE_FEATURES
-    select = ", ".join(f'count("{c}")' for c in columns)
-    sales, located, *filled = conn.execute(
-        text(f"SELECT count(*), count(geocode_status), {select} FROM marts.resale_features")
+def check_feature_coverage(conn: Connection, src: Sources) -> CheckResult:
+    """Check every transaction: in the feature mart, and each feature filled exactly when due.
+
+    The mart must hold the same `txn_id`s as staging. A sale has location features exactly
+    when its address is located in the geocode cache; block facts and derived columns are
+    filled for every sale.
+    """
+    missing_txns, extra_txns = conn.execute(
+        text(f"""
+        SELECT
+            (SELECT count(*) FROM {src.resale} AS r
+             WHERE NOT EXISTS (SELECT 1 FROM {src.features} AS f WHERE f.txn_id = r.txn_id)),
+            (SELECT count(*) FROM {src.features} AS f
+             WHERE NOT EXISTS (SELECT 1 FROM {src.resale} AS r WHERE r.txn_id = f.txn_id))
+        """)
     ).one()
-    counts = dict(zip(columns, filled, strict=True))
-    problems: list[str] = []
-    if sales != staged:
-        problems.append(f"{sales:,} rows in marts.resale_features vs {staged:,} staged sales")
-    problems += [
-        f"`{c}` missing for located sales" for c in LOCATION_FEATURES if counts[c] < located
-    ]
-    problems += [f"`{c}` missing for some sales" for c in SALE_FEATURES if counts[c] < sales]
-    if sales and located / sales < MIN_GEOCODE_COVERAGE:
-        problems.append(f"location features for only {_pct(located, sales)} of sales")
-    summary = (
-        f"Location features for {_pct(located, sales)} of {sales:,} sales "
-        "(the rest are on addresses that could not be located); block facts for every sale."
+    location = ", ".join(
+        f'count(*) FILTER (WHERE f.geocode_status IS NOT NULL AND f."{c}" IS NULL), '
+        f'count(*) FILTER (WHERE f.geocode_status IS NULL AND f."{c}" IS NOT NULL)'
+        for c in LOCATION_FEATURES
     )
-    if problems:
-        summary = "Problems: " + "; ".join(problems) + "."
+    sale = ", ".join(f'count(*) FILTER (WHERE f."{c}" IS NULL)' for c in SALE_FEATURES)
+    sales, located, wrong_status, *counts = conn.execute(
+        text(f"""
+        SELECT count(*),
+               count(f.geocode_status),
+               count(*) FILTER (
+                   WHERE (f.geocode_status IS NOT NULL)
+                         <> coalesce(c.status = ANY(:located), false)
+               ),
+               {location},
+               {sale}
+        FROM {src.features} AS f
+        LEFT JOIN {src.geocode_cache} AS c ON c.address_key = f.address_key
+        """),
+        {"located": list(DONE_STATUSES)},
+    ).one()
+    n_location = 2 * len(LOCATION_FEATURES)
+    location_counts = [tuple(counts[i : i + 2]) for i in range(0, n_location, 2)]
+    sale_counts = counts[n_location:]
+    table = [
+        (f"`{c}`", "located sales", f"{missing:,}", f"{unexpected:,}")
+        for c, (missing, unexpected) in zip(LOCATION_FEATURES, location_counts, strict=True)
+    ] + [
+        (f"`{c}`", "every sale", f"{missing:,}", "-")
+        for c, missing in zip(SALE_FEATURES, sale_counts, strict=True)
+    ]
+    problems: list[str] = []
+    if missing_txns or extra_txns:
+        problems.append(
+            f"{missing_txns:,} staged sales missing from the mart and {extra_txns:,} mart rows "
+            "not in staging"
+        )
+    if wrong_status:
+        problems.append(f"{wrong_status:,} sales whose geocode_status disagrees with the cache")
+    for c, (missing, unexpected) in zip(LOCATION_FEATURES, location_counts, strict=True):
+        if missing:
+            problems.append(f"`{c}` missing for {missing:,} located sales")
+        if unexpected:
+            problems.append(f"`{c}` set on {unexpected:,} unlocated sales")
+    problems += [
+        f"`{c}` missing for {missing:,} sales"
+        for c, missing in zip(SALE_FEATURES, sale_counts, strict=True)
+        if missing
+    ]
+    summary = (
+        "Problems: " + "; ".join(problems) + "."
+        if problems
+        else (
+            f"All {sales:,} sales are in the mart. Location features are filled for exactly the "
+            f"{located:,} sales ({_pct(located, sales)}) on located addresses; block facts for "
+            "every sale."
+        )
+    )
     return CheckResult(
         "feature_coverage",
         "Feature coverage",
         "fail" if problems else "pass",
         summary,
-        (
-            Table(
-                ("Feature", "Sales with a value", "Share of sales"),
-                tuple((f"`{c}`", f"{counts[c]:,}", _pct(counts[c], sales)) for c in columns),
-            ),
-        ),
+        (Table(("Feature", "Expected for", "Missing", "Unexpected"), tuple(table)),),
     )
 
 
-def check_price_outliers(conn: Connection) -> CheckResult:
+def check_price_outliers(conn: Connection, src: Sources) -> CheckResult:
     """Flag sales whose price per sqm is far from their town, flat type and year median.
 
     The deviation is measured in unscaled median absolute deviations (MAD). Groups whose MAD
@@ -413,12 +505,12 @@ def check_price_outliers(conn: Connection) -> CheckResult:
     """
     conn.execute(text("DROP TABLE IF EXISTS pg_temp.price_deviation"))
     conn.execute(
-        text("""
+        text(f"""
         CREATE TEMP TABLE price_deviation AS
         WITH sales AS (
             SELECT txn_id, month, town, flat_type, address_key, floor_area_sqm, resale_price,
                    price_psm, extract(year FROM month)::integer AS year
-            FROM staging.hdb_resale
+            FROM {src.resale}
         ),
         medians AS (
             SELECT town, flat_type, year,
@@ -486,7 +578,7 @@ def check_price_outliers(conn: Connection) -> CheckResult:
     return CheckResult(
         "price_outliers",
         "Price outliers",
-        "flag",
+        "flag" if flagged else "pass",
         summary,
         (
             Table(
@@ -540,15 +632,39 @@ CHECKS = (
 )
 
 
-def run_checks(engine: Engine) -> QualityReport:
-    """Run every check on one connection (read-only apart from a temporary table)."""
+def require_inputs(conn: Connection, src: Sources) -> tuple[int, date, date]:
+    """Return the sale count and month range; raise if a table is absent or has no sales."""
+    tables = (src.resale, src.geocode_cache, src.features)
+    absent = [
+        t for t in tables if conn.execute(text("SELECT to_regclass(:t)"), {"t": t}).scalar() is None
+    ]
+    if absent:
+        raise MissingInputError(
+            f"missing tables: {', '.join(absent)} "
+            "(run `make transform`, `make geocode` and `make features`)"
+        )
+    sales, first_month, last_month = conn.execute(
+        text(f"SELECT count(*), min(month), max(month) FROM {src.resale}")
+    ).one()
+    if not sales:
+        raise MissingInputError(
+            f"{src.resale} has no sales (run `make ingest` and `make transform`)"
+        )
+    return sales, first_month, last_month
+
+
+def run_checks(engine: Engine, src: Sources | None = None) -> QualityReport:
+    """Run every check on one connection (read-only apart from a temporary table).
+
+    Raises MissingInputError when an input table is absent or empty, so a missing pipeline
+    step fails `make check` instead of producing an empty, passing report.
+    """
+    src = src or Sources()
     with engine.connect() as conn:
-        sales, first_month, last_month = conn.execute(
-            text("SELECT count(*), min(month), max(month) FROM staging.hdb_resale")
-        ).one()
+        sales, first_month, last_month = require_inputs(conn, src)
         results = []
         for check in CHECKS:
-            result = check(conn)
+            result = check(conn, src)
             logger.info("%-18s %-4s %s", result.name, result.status.upper(), result.summary)
             results.append(result)
         conn.rollback()

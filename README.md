@@ -202,24 +202,28 @@ credentials.
 `make check` runs `tests/test_data_quality.py` against the live database (after
 `make features`) and writes [`reports/data_quality.md`](reports/data_quality.md). The report is
 written before any assertion, so a failing run still explains itself, and it depends only on
-the data, so re-running it without new data changes nothing. The checks, defined in
+the data, so re-running it without new data changes nothing. A missing input table, or one with
+no sales, fails the run instead of skipping it. `make test-db` leaves this gate out and runs
+`tests/test_quality_checks_db.py` instead, which injects faults into small copies of the
+tables to test each check. The checks, defined in
 `pipeline/quality/checks.py`:
 
 | Check | Fails when |
 |---|---|
-| Row counts per year | A year has under half the previous year's sales. A partial year is scaled to 12 months first, and a year with no sales fails. |
+| Row counts per year | Any month between the first and last has no sales, or a year has under half the previous year's sales. Only the partial first and last years are scaled to 12 months. |
 | Nulls | Any required column in `staging.hdb_resale` or `marts.resale_features` has a NULL. |
 | Ranges | `floor_area_sqm` is outside 25–300, `resale_price` is not above 0, or `storey_mid` is outside 1–60. |
 | Known values | A `flat_type` or `town` is not in the known list (7 flat types; HDB's 26 towns plus Lim Chu Kang). |
 | Geocode coverage | Under 99.5% of addresses are located, or any sale since 2015 is not. |
-| Feature coverage | The feature mart is missing sales, or a feature is NULL where it should be filled. |
-| Price outliers | Never: they are flagged, not failed. |
+| Feature coverage | Checked per sale: the mart and staging hold different `txn_id`s, a sale's `geocode_status` disagrees with the geocode cache, a location feature is NULL on a located sale or set on an unlocated one, or a block fact is NULL. |
+| Price outliers | Never: they are flagged, not failed. No outliers is a pass. |
 
 Two judgement calls:
 
 - **Terrace houses.** Two sales are above 300 sqm. Both are HDB terrace houses in Whampoa,
-  whose floor area includes their land (366.7 sqm sold for $1.568M in 2024). Rows with
-  `flat_model = 'Terrace'` are allowed outside the floor-area range, and the report lists them.
+  whose floor area includes their land (366.7 sqm sold for $1.568M in 2024). Only Terrace
+  sales in Kallang/Whampoa between 300 and 400 sqm are allowed, and the report lists them.
+  Anything else outside 25–300 sqm fails, such as a terrace outside Whampoa or above 400 sqm.
 - **Price outliers.** A sale is flagged when its price per sqm is more than 4 median absolute
   deviations from the median of its town, flat type and year. The MAD is unscaled, so 4 MADs
   is about 2.7 standard deviations for normal data, and about 2.8% of sales are flagged.

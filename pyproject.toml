@@ -49,4 +49,5 @@ testpaths = ["tests"]
 addopts = "-m 'not db'"
 markers = [
     "db: needs a running Postgres reachable via DATABASE_URL (run with `make test-db`)",
+    "quality: data quality gate on the built pipeline (run with `make check`)",
 ]
