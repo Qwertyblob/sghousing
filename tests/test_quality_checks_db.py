@@ -129,6 +129,22 @@ def test_feature_coverage_is_checked_per_transaction(fixture: tuple[Engine, Sour
     assert "`lat` set on 1 unlocated sales" in result.summary
 
 
+def test_geocode_status_must_match_the_cache(fixture: tuple[Engine, Sources]) -> None:
+    # Still located, so a located/unlocated comparison would miss it.
+    engine, src = fixture
+    f = src.features
+    run_sql(
+        engine,
+        f"""UPDATE {f}
+            SET geocode_status = CASE geocode_status WHEN 'ok' THEN 'approx' ELSE 'ok' END
+            WHERE txn_id = (SELECT min(txn_id) FROM {f} WHERE geocode_status IS NOT NULL)""",
+    )
+    with engine.connect() as conn:
+        result = check_feature_coverage(conn, src)
+    assert result.status == "fail"
+    assert "1 sales whose geocode_status disagrees with the cache" in result.summary
+
+
 @pytest.mark.parametrize(
     ("town", "area", "status"),
     [

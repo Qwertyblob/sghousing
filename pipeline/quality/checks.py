@@ -440,9 +440,11 @@ def check_feature_coverage(conn: Connection, src: Sources) -> CheckResult:
         text(f"""
         SELECT count(*),
                count(f.geocode_status),
+               -- The mart's status must be the cache's status for a located address, and
+               -- NULL otherwise.
                count(*) FILTER (
-                   WHERE (f.geocode_status IS NOT NULL)
-                         <> coalesce(c.status = ANY(:located), false)
+                   WHERE f.geocode_status IS DISTINCT FROM
+                         CASE WHEN c.status = ANY(:located) THEN c.status END
                ),
                {location},
                {sale}
