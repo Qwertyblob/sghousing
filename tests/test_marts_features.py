@@ -206,6 +206,36 @@ def test_rebuilt_block_keeps_generations_apart(live: Engine) -> None:
     assert [tuple(r) for r in rows] == [(1978, 15, 1978), (2013, 40, 2012)]
 
 
+def test_new_generation_only_after_old_sales_end(live: Engine) -> None:
+    """A later generation is a replacement building: no earlier generation's sale may fall
+    in or after its lease start year."""
+    overlapping = scalar(
+        live,
+        """
+        SELECT count(*) FROM marts.block_generations AS g
+        JOIN staging.hdb_resale AS r
+          ON r.address_key = g.address_key AND r.lease_commence_year < g.lease_year_from
+        WHERE g.generation > 0 AND extract(year FROM r.month) >= g.lease_year_from
+        """,
+    )
+    assert overlapping == 0
+
+
+def test_concurrent_lease_years_stay_one_building(live: Engine) -> None:
+    """37 TEBAN GDNS RD: 1966-lease sales run 2004-2026 and one 1981-lease sale is in 2025,
+    so both lease years are the same standing building."""
+    with live.connect() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT block_generation, block_max_floor, block_year_completed "
+                "FROM marts.resale_features WHERE address_key = '37 TEBAN GDNS RD'"
+            )
+        ).all()
+    if not rows:
+        pytest.skip("37 TEBAN GDNS RD not in the data")
+    assert [tuple(r) for r in rows] == [(0, 5, 1976)]
+
+
 @pytest.mark.parametrize(
     ("table", "column", "method"),
     [

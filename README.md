@@ -181,10 +181,12 @@ Choices worth knowing:
 - **Parks.** Distances are to the park edge, so a block inside a park gets 0.
 - **Block facts.** A demolished block's number is sometimes reused for a new building: 21
   Teban Gardens Road was a 15-storey block from 1978 and is now a 40-storey block completed
-  in 2012. Sales at an address are grouped into generations by lease start year (a jump of
-  more than 3 years starts a new one). HDB property information describes today's building,
-  so it is used only for the latest generation, and only if it is residential and completed no
-  later than that generation's first resale. Otherwise the highest storey sold and the
+  in 2012. Sales at an address are grouped into generations by lease start year. A new one
+  starts only when the lease start year jumps by more than 3 years and every earlier sale
+  happened before that year. A jump while the older lease is still being sold (37 Teban
+  Gardens Road) is treated as the same building. HDB property information describes today's
+  building, so it is used only for the latest generation, and only if it is residential and
+  completed no later than that generation's first resale. Otherwise the highest storey sold and the
   earliest lease start year are used (`block_info_source = 'transactions'`).
 - **Amenities are today's.** A station or hawker centre that opened in 2020 also counts for a
   1995 sale.

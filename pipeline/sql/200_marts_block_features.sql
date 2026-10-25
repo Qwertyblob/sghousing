@@ -7,8 +7,11 @@
 
 -- Building generations: a demolished block's number can be reused for a new building at the
 -- same address (e.g. 21 TEBAN GDNS RD: a 1978 block sold 1990-1999, a 2013 block sold from
--- 2016). Sales are grouped by lease start year; a jump of more than 3 years starts a new
--- generation. HDB property information describes the building standing today, so it is only
+-- 2016). Sales are grouped by lease start year. A new generation starts only on evidence of
+-- replacement: the lease start year jumps by more than 3 years AND every earlier sale at the
+-- address happened before that year (the old building was gone before the new lease began).
+-- A jump without that is the same building with an odd lease record (e.g. 37 TEBAN GDNS RD:
+-- 1966-lease sales 2004-2026 and one 1981-lease sale in 2025). HDB property information describes the building standing today, so it is only
 -- used for the current generation, and only when it is residential and completed no later than
 -- that generation's first sale (otherwise the number was reused for something else, e.g. a
 -- 2017 non-residential building at an address with resales from 1990). Other generations take
@@ -22,7 +25,8 @@ WITH lease_years AS (
            lease_commence_year AS lease_year,
            count(*) AS n_sales,
            max(storey_hi) AS max_storey_seen,
-           min(extract(year FROM month))::integer AS first_sale_year
+           min(extract(year FROM month))::integer AS first_sale_year,
+           max(extract(year FROM month))::integer AS last_sale_year
     FROM staging.hdb_resale
     GROUP BY address_key, lease_commence_year
 ),
@@ -34,7 +38,11 @@ numbered AS (
                CASE
                    WHEN lease_year - lag(lease_year) OVER (
                        PARTITION BY address_key ORDER BY lease_year
-                   ) > 3 THEN 1
+                   ) > 3
+                   AND max(last_sale_year) OVER (
+                       PARTITION BY address_key ORDER BY lease_year
+                       ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ) < lease_year THEN 1
                    ELSE 0
                END AS starts_generation
         FROM lease_years
