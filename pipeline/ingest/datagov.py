@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import time
@@ -37,6 +38,7 @@ DOWNLOAD_BASE = "https://api-open.data.gov.sg/v1/public/api"
 FORMAT_EXTENSIONS = {"CSV": "csv", "GEOJSON": "geojson"}
 API_TIMEOUT_S = 30.0  # per request, further capped by the operation deadline
 DOWNLOAD_TIMEOUT_S = 60.0
+MAX_STORAGE_REDIRECTS = 5
 
 
 class DataGovError(RuntimeError):
@@ -111,12 +113,20 @@ class DataGovClient:
     def _api_once(self, url: str, kind: str, policy: RetryPolicy) -> dict[str, Any]:
         policy.charge()
         self.request_counts[kind] += 1
-        response = self._api.get(url, timeout=policy.timeout(API_TIMEOUT_S))
-        if response.is_redirect or 300 <= response.status_code < 400:
-            raise UnsafeRequestError(f"API redirect refused ({response.status_code}) for {kind}")
-        raise_for_retryable(response)
-        response.raise_for_status()
-        body = response.json()
+        with self._api.stream("GET", url, timeout=policy.timeout(API_TIMEOUT_S)) as response:
+            if response.is_redirect or 300 <= response.status_code < 400:
+                raise UnsafeRequestError(
+                    f"API redirect refused ({response.status_code}) for {kind}"
+                )
+            raise_for_retryable(response)
+            response.raise_for_status()
+            # Read chunk by chunk: httpx's read timeout is per read, so a slowly trickling
+            # body could otherwise outlive the operation deadline.
+            payload = bytearray()
+            for chunk in response.iter_bytes():
+                policy.check_deadline()
+                payload += chunk
+        body = json.loads(payload)
         if body.get("code") != 0:
             raise DataGovError(body.get("code"), body.get("errorMsg") or body.get("name") or "")
         return body.get("data") or {}
@@ -151,26 +161,34 @@ class DataGovClient:
         part = directory / f".{uuid.uuid4().hex}.part"
         digest = hashlib.sha256()
         nbytes = 0
-        policy.charge()
-        self.request_counts["storage"] += 1
         try:
-            timeout = policy.timeout(DOWNLOAD_TIMEOUT_S)
-            with self._download.stream("GET", url, timeout=timeout) as response:
-                raise_for_retryable(response)
-                response.raise_for_status()
-                with part.open("wb") as f:
-                    # No chunk_size: buffering to a fixed size would delay the deadline check.
-                    for chunk in response.iter_bytes():
-                        policy.check_deadline()
-                        f.write(chunk)
-                        digest.update(chunk)
-                        nbytes += len(chunk)
-                    f.flush()
-                    os.fsync(f.fileno())
+            # Redirects are followed here rather than by httpx so every hop is charged to the
+            # budget and gets a deadline-capped timeout.
+            for _hop in range(MAX_STORAGE_REDIRECTS + 1):
+                policy.charge()
+                self.request_counts["storage"] += 1
+                timeout = policy.timeout(DOWNLOAD_TIMEOUT_S)
+                with self._download.stream("GET", url, timeout=timeout) as response:
+                    if response.is_redirect:
+                        url = str(response.url.join(response.headers["Location"]))
+                        continue
+                    raise_for_retryable(response)
+                    response.raise_for_status()
+                    with part.open("wb") as f:
+                        # No chunk_size: buffering to a fixed size would delay the deadline
+                        # check.
+                        for chunk in response.iter_bytes():
+                            policy.check_deadline()
+                            f.write(chunk)
+                            digest.update(chunk)
+                            nbytes += len(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    return part, digest.hexdigest(), nbytes
+            raise httpx.TooManyRedirects(f"more than {MAX_STORAGE_REDIRECTS} storage redirects")
         except BaseException:
             part.unlink(missing_ok=True)
             raise
-        return part, digest.hexdigest(), nbytes
 
     def _transfer(
         self, meta: DatasetMetadata, directory: Path, policy: RetryPolicy

@@ -23,7 +23,7 @@ from pipeline.common.http import (
     make_api_client,
 )
 from pipeline.ingest import snapshots
-from pipeline.ingest.datagov import DataGovClient, DataGovError
+from pipeline.ingest.datagov import MAX_STORAGE_REDIRECTS, DataGovClient, DataGovError
 from pipeline.ingest.snapshots import SGT
 
 DATASET = "d_test0000000000000000000000000001"
@@ -463,3 +463,48 @@ def test_repeated_stream_failures_share_one_budget(tmp_path: Path) -> None:
         h.download()
     assert len([k for k in server.kinds() if k != "metadata"]) <= 7
     assert not list(h.dir.glob(".*.part"))
+
+
+class SlowJSONStream(httpx.SyncByteStream):
+    """A valid JSON API body delivered one byte-chunk at a time, each taking `seconds`."""
+
+    def __init__(self, clock: FakeClock, body: dict, seconds: float) -> None:
+        self.clock, self.payload, self.seconds = clock, json.dumps(body).encode(), seconds
+
+    def __iter__(self) -> Iterator[bytes]:
+        for i in range(0, len(self.payload), 8):
+            self.clock.t += self.seconds
+            yield self.payload[i : i + 8]
+
+
+def test_slow_api_body_is_stopped_at_deadline(tmp_path: Path) -> None:
+    server = FakeServer()
+    h = Harness(tmp_path, server, timeout_s=100)
+    body = {"code": 0, "data": {"datasetId": DATASET, "name": "x", "format": "CSV"}}
+    server.script("metadata", httpx.Response(200, stream=SlowJSONStream(h.fake_clock, body, 30)))
+    with pytest.raises(DeadlineExceededError):
+        h.client.get_dataset_metadata(DATASET)
+    assert h.fake_clock.t <= 100 + 30
+    assert server.kinds() == ["metadata"]
+
+
+def test_storage_redirect_hops_are_charged(tmp_path: Path) -> None:
+    server = FakeServer()
+    hop = httpx.Response(302, headers={"Location": "https://other-storage.test/next"})
+    server.script("storage", *[hop] * 3)
+    h = Harness(tmp_path, server, max_attempts=5)  # initiate + poll + 3 storage hops = 5
+    with pytest.raises(RetryBudgetExhaustedError):
+        h.download()
+    assert [k for k in server.kinds() if k != "metadata"] == ["initiate", "poll"] + ["storage"] * 3
+    assert not list(h.dir.glob(".*.part"))
+
+
+def test_storage_redirect_loop_is_bounded(tmp_path: Path) -> None:
+    server = FakeServer()
+    hop = httpx.Response(302, headers={"Location": "https://other-storage.test/loop"})
+    server.script("storage", *[hop] * 100)
+    h = Harness(tmp_path, server, max_attempts=50)
+    with pytest.raises(httpx.TooManyRedirects):
+        h.download()
+    assert server.kinds().count("storage") == MAX_STORAGE_REDIRECTS + 1
+    assert all(API_KEY_HEADER not in r.headers for k, r in server.log if k == "storage")

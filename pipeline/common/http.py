@@ -102,11 +102,15 @@ def make_api_client(
 
 
 def make_download_client(*, transport: httpx.BaseTransport | None = None) -> httpx.Client:
-    """Credential-free client for pre-signed storage URLs. Follows redirects."""
+    """Credential-free client for pre-signed storage URLs.
+
+    Redirects are not followed automatically; the caller follows them so that each hop is
+    charged to its retry budget and deadline.
+    """
     return httpx.Client(
         headers={"User-Agent": USER_AGENT},
         timeout=httpx.Timeout(60.0, connect=10.0),
-        follow_redirects=True,
+        follow_redirects=False,
         transport=transport,
     )
 
