@@ -29,6 +29,8 @@ class Settings(BaseSettings):
         env_file=REPO_ROOT / ".env",
         env_file_encoding="utf-8",
         extra="forbid",
+        # Validation errors must never echo DATABASE_URL, API keys or passwords.
+        hide_input_in_errors=True,
     )
 
     database_url: str = "postgresql+psycopg://sg:sg@localhost:5432/sg_housing"
@@ -39,6 +41,8 @@ class Settings(BaseSettings):
     onemap_email: str | None = None
     onemap_password: SecretStr | None = None
     geocode_requests_per_second: float = 3.0
+    datagov_max_attempts: int = Field(default=8, ge=1)
+    datagov_download_timeout_s: float = Field(default=600.0, gt=0)
 
     train_end: date = date(2023, 12, 1)
     valid_end: date = date(2024, 12, 1)

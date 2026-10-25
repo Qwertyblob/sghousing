@@ -70,9 +70,34 @@ Run `make help` for the current list.
 | `all` | Ingest through export, in order |
 | `clean` | Remove caches and build output (keeps data and DB) |
 
-## Adding a new reference dataset
+## Ingestion
 
-<!-- Phase 1 -->
+`make ingest` downloads every dataset in data.gov.sg collection 189 (HDB resale prices; the
+dataset list is read from the collection metadata on each run) plus the reference datasets in
+`pipeline/ingest/reference.py`, and loads them into `raw` tables with every source value kept
+as text. Re-running is safe: unchanged files are skipped by SHA-256 and a changed file replaces
+that dataset's rows in a single transaction.
+
+- **API key (optional).** Set `DATAGOV_API_KEY` in `.env` for higher rate limits. It is sent
+  only to the data.gov.sg API hosts, never to the storage URLs files are downloaded from.
+- **Rate limits.** data.gov.sg's own pages disagree (5 requests/minute vs 2 per 10 seconds
+  without a key), so the client adapts instead: it retries 429/5xx responses, honouring
+  `Retry-After`, with exponential backoff.
+- **Snapshots.** Files land in `data/raw/{source}/{dataset_id}/` as
+  `{YYYY-MM-DD}_{sha256}.{csv|geojson}` with a `.meta.json` sidecar, and are never overwritten.
+  `current.json` names the snapshot in use. A dataset already retrieved today is reused without
+  downloading; `uv run python -m pipeline.ingest --force-download` fetches again.
+- `--only resale|reference|<key>` limits a run to part of the data.
+
+### Adding a new reference dataset
+
+1. Find the dataset on data.gov.sg and confirm its ID with
+   `curl https://api-production.data.gov.sg/v2/public/api/datasets/<id>/metadata`.
+2. Add a `ReferenceDataset(key, dataset_id, description)` entry to `REFERENCE_DATASETS` in
+   `pipeline/ingest/reference.py`, with a comment linking to
+   `https://data.gov.sg/datasets/<id>/view`.
+3. Run `make ingest`. CSVs load as text columns and GeoJSON as `properties jsonb` plus
+   `geometry_geojson text`, into `raw.ref_<key>`.
 
 ## Data sources and licences
 
@@ -89,7 +114,10 @@ indicative only.
 
 ## Limitations
 
-<!-- Phase 7 -->
+- No supermarket proximity feature: data.gov.sg has no current supermarket location dataset
+  (the only candidate is a June 2016 licence list without coordinates).
+
+<!-- Phase 7: model limitations -->
 
 ## Licence
 

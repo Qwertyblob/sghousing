@@ -63,8 +63,8 @@ define not_implemented
 	@echo "make $@: not implemented yet (Phase $(1))" >&2; exit 1
 endef
 
-ingest: ## Download and load raw data (Phase 1)
-	$(call not_implemented,1)
+ingest: ## Download data.gov.sg datasets into data/raw and load raw tables
+	uv run python -m pipeline.ingest
 
 transform: ## Run SQL staging transforms (Phase 2)
 	$(call not_implemented,2)

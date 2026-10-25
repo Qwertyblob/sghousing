@@ -13,3 +13,7 @@ def setup_logging(level: int | str = logging.INFO) -> None:
     Safe to call more than once: later calls replace the handler rather than adding another.
     """
     logging.basicConfig(level=level, format=_FORMAT, datefmt="%Y-%m-%d %H:%M:%S", force=True)
+    # httpx logs full request URLs at INFO; pre-signed storage URLs carry temporary
+    # credentials, so keep these libraries at WARNING.
+    for noisy in ("httpx", "httpcore"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)

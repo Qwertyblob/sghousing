@@ -16,6 +16,8 @@ __pycache__/
 !/data/manual/
 
 # Models: only model cards are committed
+/models/*
+!/models/*/
 /models/*/*
 !/models/*/model_card.md
 

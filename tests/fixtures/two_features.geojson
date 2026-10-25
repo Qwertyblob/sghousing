@@ -1,0 +1,6 @@
+{"type": "FeatureCollection", "features": [
+  {"type": "Feature", "properties": {"NAME": "Alpha Park", "CODE": "01"},
+   "geometry": {"type": "Point", "coordinates": [103.85, 1.29]}},
+  {"type": "Feature", "properties": {"NAME": "Beta Park"},
+   "geometry": {"type": "Polygon", "coordinates": [[[103.80, 1.30], [103.81, 1.30], [103.81, 1.31], [103.80, 1.30]]]}}
+]}

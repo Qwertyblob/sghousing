@@ -18,6 +18,8 @@ _SETTINGS_ENV_VARS = (
     "ONEMAP_EMAIL",
     "ONEMAP_PASSWORD",
     "GEOCODE_REQUESTS_PER_SECOND",
+    "DATAGOV_MAX_ATTEMPTS",
+    "DATAGOV_DOWNLOAD_TIMEOUT_S",
     "TRAIN_END",
     "VALID_END",
     "DATA_DIR",
@@ -90,6 +92,19 @@ def test_rate_must_be_finite_positive(rate: float) -> None:
 def test_port_mismatch_rejected() -> None:
     with pytest.raises(ValidationError, match="does not match POSTGRES_PORT"):
         make(postgres_port=5433)
+
+
+def test_validation_errors_hide_secrets() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        make(
+            database_url="postgresql+psycopg://sg:dbpass-xyz@localhost:5432/sg_housing",
+            datagov_api_key="key-abc-123",
+            onemap_password="pw-def-456",
+            postgres_port=5433,
+        )
+    message = str(exc_info.value)
+    for secret in ("dbpass-xyz", "key-abc-123", "pw-def-456"):
+        assert secret not in message
 
 
 def test_port_match_on_nondefault_port() -> None:
