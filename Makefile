@@ -11,7 +11,7 @@ PSQL := $(COMPOSE) exec -T -e PGOPTIONS='-c client_min_messages=warning' db \
 .DEFAULT_GOAL := help
 
 .PHONY: help setup db-up db-down db-shell db-reset db-check test test-db lint \
-	ingest transform geocode features check train evaluate export \
+	ingest transform geocode features check eda train evaluate export \
 	site-dev site-build publish snapshot restore-snapshot all clean
 
 help: ## List all targets
@@ -77,6 +77,10 @@ features: ## Build marts.block_features and marts.resale_features (PostGIS SQL)
 
 check: ## Data quality checks; writes reports/data_quality.md (needs `make features`)
 	uv run pytest -m quality
+
+eda: ## Run the EDA notebooks; saves figures to reports/figures (notebook outputs stay clear)
+	@out=$$(mktemp -d) && trap 'rm -rf "$$out"' EXIT && \
+		uv run jupyter nbconvert --to notebook --execute --output-dir "$$out" notebooks/*.ipynb
 
 train: ## Train baselines and LightGBM models (Phase 7)
 	$(call not_implemented,7)

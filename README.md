@@ -65,6 +65,7 @@ Run `make help` for the current list.
 | `test` / `test-db` | Unit tests / database integration tests |
 | `lint` | Ruff lint and format check |
 | `ingest` … `export` | Pipeline stages (Phases 1–8) |
+| `eda` | Run the EDA notebooks and save their figures (outputs are not written back) |
 | `site-dev`, `site-build`, `publish` | Website (Phases 9–10) |
 | `snapshot`, `restore-snapshot` | Parquet snapshot of marts tables (Phase 10) |
 | `all` | Ingest through export, in order |
@@ -229,6 +230,24 @@ Two judgement calls:
   is about 2.7 standard deviations for normal data, and about 2.8% of sales are flagged.
   Groups whose MAD is 0 (a few tiny groups) are not scored. The report gives counts by flat
   type and the 25 most extreme sales.
+
+## Exploratory analysis
+
+The notebooks in `notebooks/` read the `marts` tables through `pipeline/eda/data.py`, which
+does the aggregation in SQL. They plot with `pipeline/eda/figures.py`. `make eda` executes them
+into a temporary directory, so the committed notebooks stay free of outputs (a unit test
+checks this). Each figure is saved as PNG and SVG in `reports/figures/` without timestamps,
+so re-running on the same data rewrites identical files. The findings are in
+[`reports/eda_summary.md`](reports/eda_summary.md).
+
+| Notebook | Analyses |
+|---|---|
+| `01_prices_and_volume` | Median price per sqm by flat type (2012 dating change marked); transactions per month with market events |
+| `02_towns_and_map` | Town ranking over the latest 12 months with 2-year change; planning-area choropleth |
+| `03_price_drivers` | Lease decay, floor-level premium and distance to the MRT, each relative to similar flats (same town, flat type and year) |
+| `04_feature_associations` | Spearman correlation and mutual information of each feature with log price |
+
+To explore interactively, run `uv run jupyter lab`, then clear outputs before committing.
 
 ## Data sources and licences
 
