@@ -78,8 +78,10 @@ blocks themselves (newer, often more central), not from height within a block. B
 ## 9. Living near the MRT is worth about 7%, and fades within 600 m
 
 Compared with similar flats, sales within 200 m of an MRT exit fetch 7.4% more and those at
-200–400 m 4.1% more. At 400–600 m the premium is about zero, and beyond 600 m prices sit 2–3%
-below similar flats with no further decline. The raw medians (left panel) are U-shaped
+200–400 m 4.1% more. At 400–600 m the premium is about zero, and from 600 m to 2 km prices sit
+2–3% below similar flats with no further decline. The last bucket, beyond 2 km, is back at
+about the median, but it holds only 3,823 of the 280,653 sales since 2015 (1.4%), too few to
+read as a trend. The raw medians (left panel) are U-shaped
 because distance there is mixed up with location: they show why the comparison needs to be
 within town.
 
@@ -87,12 +89,13 @@ within town.
 
 ## 10. Size dominates; location matters non-linearly; amenity counts add little
 
-On a fixed sample of 50,000 sales since 2015, floor area (mutual information 0.37) and flat
-type (0.28) carry the most information about log price. Next come block height (0.17),
-distance to the CBD (0.16), remaining lease (0.16), latitude and longitude (0.15 each) and
+On a fixed sample of 50,000 sales since 2015, floor area (mutual information 0.38) and flat
+type (0.29) carry the most information about log price. Next come block height (0.17),
+distance to the CBD (0.16), remaining lease (0.15), latitude and longitude (0.15 each) and
 month (0.14). Distance to the CBD has a weak rank correlation (−0.13) but high mutual
 information, so its effect is non-linear, which suits a tree model. Amenity counts and
 distances (schools, parks, hawker centres, MRT exits within 500 m) each carry under 0.08.
+Counts, storeys, block height and flat type are scored as discrete features.
 
 ![Feature associations](figures/feature_associations.png)
 

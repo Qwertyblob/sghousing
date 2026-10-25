@@ -17,7 +17,8 @@ from sqlalchemy import Engine, text
 
 # From 2015 every sale is located and has every feature (see reports/data_quality.md).
 RECENT_FROM = date(2015, 1, 1)
-# A town or planning area needs this many sales in each window to be ranked or mapped.
+# A town or planning area needs this many sales in the latest 12 months to be ranked or
+# mapped, and this many in the earlier window for its 2-year change to be shown.
 MIN_GROUP_SALES = 50
 # A bin (lease year, storey, distance bucket) needs this many sales to be plotted.
 MIN_BIN_SALES = 200
@@ -52,6 +53,13 @@ ASSOCIATION_FEATURES = (
     "lon",
     "month_index",
 )
+# Integer-valued counts and ranks with few distinct values: mutual information treats them as
+# discrete (the nearest-neighbour estimator for continuous features is biased by ties).
+# month_index and remaining_lease_months take hundreds of values and stay continuous.
+DISCRETE_FEATURES = frozenset(
+    {"flat_type_rank", "storey_mid", "block_max_floor", "n_mrt_exits_500m", "n_primary_schools_1km"}
+)
+WINDOW_COLUMNS = ("earlier_median_psm", "latest_median_psm", "earlier_sales", "latest_sales")
 
 # Price per sqm relative to the median of the sale's town, flat type and year. This removes
 # most of the effect of location, flat type and the market's level, leaving within-group
@@ -121,10 +129,25 @@ def monthly_volume(engine: Engine) -> pd.DataFrame:
     )
 
 
+def window_medians(rows: pd.DataFrame, group: str) -> pd.DataFrame:
+    """Turn (grp, win, median_psm, sales) rows into one row per group.
+
+    A group is kept when it has MIN_GROUP_SALES in the latest window, whatever its history.
+    Its 2-year change is NaN when the earlier window has fewer sales than that.
+    """
+    wide = rows.pivot(index="grp", columns="win", values=["median_psm", "sales"])
+    wide.columns = [f"{win}_{measure}" for measure, win in wide.columns]
+    wide = wide.reindex(columns=list(WINDOW_COLUMNS))
+    wide[["earlier_sales", "latest_sales"]] = wide[["earlier_sales", "latest_sales"]].fillna(0)
+    wide = wide[wide["latest_sales"] >= MIN_GROUP_SALES].copy()
+    change = wide["latest_median_psm"] / wide["earlier_median_psm"] - 1
+    wide["change"] = change.where(wide["earlier_sales"] >= MIN_GROUP_SALES)
+    return wide.rename_axis(group).reset_index()
+
+
 def _latest_and_earlier(engine: Engine, group: str) -> pd.DataFrame:
     """Median price per sqm by `group` in the latest 12 months and the same 12 months two
-    years earlier, with the 2-year change; groups short of MIN_GROUP_SALES in either window
-    are dropped."""
+    years earlier, with the 2-year change (see `window_medians`)."""
     rows = _read(
         engine,
         f"""
@@ -147,14 +170,7 @@ def _latest_and_earlier(engine: Engine, group: str) -> pd.DataFrame:
         GROUP BY grp, win
         """,
     )
-    wide = rows.pivot(index="grp", columns="win", values=["median_psm", "sales"])
-    wide.columns = [f"{win}_{measure}" for measure, win in wide.columns]
-    wide = wide.dropna()
-    wide = wide[
-        (wide["latest_sales"] >= MIN_GROUP_SALES) & (wide["earlier_sales"] >= MIN_GROUP_SALES)
-    ]
-    wide["change"] = wide["latest_median_psm"] / wide["earlier_median_psm"] - 1
-    return wide.rename_axis(group).reset_index()
+    return window_medians(rows, group)
 
 
 def town_ranking(engine: Engine) -> pd.DataFrame:
@@ -168,7 +184,7 @@ def town_ranking(engine: Engine) -> pd.DataFrame:
 
 def planning_area_prices(engine: Engine) -> gpd.GeoDataFrame:
     """Planning-area boundaries with the latest 12 months' median price per sqm (NaN where
-    an area has too few HDB resales)."""
+    an area has too few HDB resales in that window; earlier years do not matter)."""
     with engine.connect() as conn:
         areas = gpd.read_postgis(
             text("SELECT planning_area, region, geom FROM staging.planning_areas"),
@@ -292,7 +308,10 @@ def feature_associations(sample: pd.DataFrame, seed: int = 0) -> pd.DataFrame:
     x = sample[features].astype(float)
     y = sample["log_price"].astype(float)
     spearman = x.corrwith(y, method="spearman")
-    mi = mutual_info_regression(x.to_numpy(), y.to_numpy(), random_state=seed)
+    discrete = [f in DISCRETE_FEATURES for f in features]
+    mi = mutual_info_regression(
+        x.to_numpy(), y.to_numpy(), discrete_features=discrete, random_state=seed
+    )
     out = pd.DataFrame(
         {"feature": features, "spearman": spearman.to_numpy(), "mutual_info": np.asarray(mi)}
     )

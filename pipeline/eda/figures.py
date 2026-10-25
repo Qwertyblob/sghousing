@@ -152,7 +152,7 @@ def town_ranking(df: pd.DataFrame, window: str) -> Figure:
     bars = ax.barh(ordered["town"], ordered["latest_median_psm"], color=BLUE, height=0.7)
     for bar, change in zip(bars, ordered["change"], strict=True):
         ax.annotate(
-            f"{change:+.0%}",
+            "n/a" if pd.isna(change) else f"{change:+.0%}",
             (bar.get_width(), bar.get_y() + bar.get_height() / 2),
             xytext=(4, 0),
             textcoords="offset points",
@@ -161,6 +161,8 @@ def town_ranking(df: pd.DataFrame, window: str) -> Figure:
             color=TEXT_SECONDARY,
         )
     ax.set_title(f"Median price per sqm by town, {window} (label: change over 2 years)")
+    if ordered["change"].isna().any():
+        _source_note(fig, "n/a: fewer than 50 sales in the same 12 months two years earlier.")
     ax.set_xlabel("S$ per sqm")
     ax.xaxis.set_major_formatter(mpl.ticker.StrMethodFormatter("{x:,.0f}"))
     ax.grid(axis="y", visible=False)
