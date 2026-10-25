@@ -28,3 +28,6 @@ node_modules/
 
 # OS
 .DS_Store
+
+# Generated reports that contain data
+/reports/geocode_failures.csv

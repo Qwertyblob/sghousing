@@ -75,7 +75,12 @@ CREATE TABLE staging.schools AS
 SELECT
     staging.norm_text(school_name) AS school_name,
     staging.norm_text(address) AS address,
-    staging.norm_text(postal_code) AS postal_code,
+    -- Singapore postal codes have 6 digits; the source drops the leading zero of a few
+    -- central-area codes (e.g. 88256 for 088256).
+    CASE
+        WHEN staging.norm_text(postal_code) ~ '^\d{5}$' THEN '0' || staging.norm_text(postal_code)
+        ELSE staging.norm_text(postal_code)
+    END AS postal_code,
     staging.norm_text(mainlevel_code) AS mainlevel_code,
     staging.norm_text(zone_code) AS zone_code,
     (staging.norm_text(mainlevel_code) = 'PRIMARY'

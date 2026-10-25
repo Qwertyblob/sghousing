@@ -199,3 +199,7 @@ def test_reference_geometry_valid_svy21_in_singapore(live: Engine, table: str) -
         "OR NOT ST_Within(geom, ST_MakeEnvelope(0, 15000, 60000, 55000, 3414))",
     )
     assert bad == 0
+
+
+def test_school_postal_codes_have_six_digits(live: Engine) -> None:
+    assert scalar(live, "SELECT count(*) FROM staging.schools WHERE postal_code !~ '^\\d{6}$'") == 0

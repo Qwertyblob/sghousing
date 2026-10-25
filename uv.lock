@@ -1765,6 +1765,7 @@ dependencies = [
     { name = "shapely" },
     { name = "sqlalchemy" },
     { name = "tenacity" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -1793,6 +1794,7 @@ requires-dist = [
     { name = "shapely" },
     { name = "sqlalchemy", specifier = ">=2" },
     { name = "tenacity" },
+    { name = "tqdm", specifier = ">=4.70.1" },
 ]
 
 [package.metadata.requires-dev]

@@ -5,8 +5,7 @@ downloads official data, cleans and enriches it in Postgres + PostGIS, trains a 
 with an uncertainty range, and exports everything to a static site that runs predictions in
 the browser.
 
-> Status: **Phase 2 (staging transforms)**. Later pipeline stages are stubs until their phase
-> lands.
+> Status: **Phase 3 (geocoding)**. Later pipeline stages are stubs until their phase lands.
 
 <!-- Screenshot: added in Phase 9 -->
 
@@ -125,6 +124,33 @@ Reference tables (`mrt_exits`, `planning_areas`, `hawker_centres`, `parks`, `sch
 `hdb_block_info`, `resale_price_index`) store geometry in SVY21 (EPSG:3414, metres) with GiST
 indexes. Schools have no coordinates in the source; they are geocoded in Phase 3.
 
+## Geocoding
+
+`make geocode` looks up every HDB block (`address_key`) and every school postal code with the
+[OneMap search API](https://www.onemap.gov.sg/apidocs/) and caches the results in
+`staging.geocode_cache`. The cache is never dropped by `make transform` or `make geocode`.
+
+- **Credentials (required).** OneMap needs an API token. Register at
+  <https://www.onemap.gov.sg/apidocs/register>, then set `ONEMAP_EMAIL` and `ONEMAP_PASSWORD`
+  in `.env`. The token is fetched and refreshed automatically and is never logged.
+- **Matching.** The first query is `"{block} {street_name}"`. A result is accepted when its
+  `BLK_NO` equals the block and its road name equals the street once abbreviations are
+  expanded (`AVE` becomes `AVENUE`, `BT` becomes `BUKIT`, and so on; see `ABBREVIATIONS` in
+  `pipeline/geocode/onemap.py`). If nothing matches, a second query with the abbreviations
+  expanded is tried (status `fallback`). Schools are matched on postal code.
+- **Demolished blocks.** Blocks OneMap no longer knows (mostly redeveloped estates) are placed
+  at the centroid of the located blocks on the same street (status `approx`). This is
+  recomputed every run. Blocks on streets with nothing located stay `failed`.
+- **Overrides.** Rows in `data/manual/geocode_overrides.csv`
+  (`address_key,lat,lon,postal,note`) are applied last with status `override`, and those
+  addresses are never queried.
+- **Resumable and rate limited.** Requests are spaced to `GEOCODE_REQUESTS_PER_SECOND`, and
+  results are committed every 100 addresses. A stopped run resumes where it left off, and a
+  fully cached run makes no API calls. `failed` and `approx` addresses are not queried again
+  automatically; use `uv run python -m pipeline.geocode --retry-failed`, or add an override.
+- **Failures** (`approx` and `failed`) are written to `reports/geocode_failures.csv`
+  (not committed).
+
 ## Data sources and licences
 
 Data from [data.gov.sg](https://data.gov.sg) is used under the
@@ -145,6 +171,9 @@ indicative only.
 - Before 2012 the lease start is a year only and the month is the approval date, so 51 sales
   are dated before their lease start year. Their flat age is floored at 0 and their remaining
   lease capped at 99 years.
+- About 1.3% of resale transactions, all before 2015, are on demolished blocks. 125 blocks
+  (11,763 sales) have street-centroid locations (status `approx`). 35 blocks (1,865 sales)
+  could not be located at all. Every transaction from 2015 onwards has an exact location.
 - `txn_id` depends on row order in the source files. If HDB re-issues a file with rows inserted
   mid-file, IDs for later rows in that file change.
 

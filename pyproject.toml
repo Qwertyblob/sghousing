@@ -22,6 +22,7 @@ dependencies = [
     "onnxmltools",
     "onnxruntime",
     "matplotlib",
+    "tqdm>=4.70.1",
 ]
 
 [dependency-groups]

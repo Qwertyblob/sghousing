@@ -69,8 +69,8 @@ ingest: ## Download data.gov.sg datasets into data/raw and load raw tables
 transform: ## Run SQL staging transforms (raw -> staging)
 	uv run python -m pipeline.common.sql_runner '0*.sql' '1*.sql'
 
-geocode: ## Geocode addresses via OneMap (Phase 3)
-	$(call not_implemented,3)
+geocode: ## Geocode addresses via OneMap (needs ONEMAP_EMAIL/ONEMAP_PASSWORD)
+	uv run python -m pipeline.geocode
 
 features: ## Build spatial features and marts (Phase 4)
 	$(call not_implemented,4)
