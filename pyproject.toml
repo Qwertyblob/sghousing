@@ -1,0 +1,51 @@
+[project]
+name = "sghousing"
+version = "0.1.0"
+description = "Singapore HDB resale price explorer and predictor: local data pipeline + static site."
+readme = "README.md"
+license = "MIT"
+requires-python = "==3.12.*"
+dependencies = [
+    "httpx",
+    "tenacity",
+    "pandas",
+    "pyarrow",
+    "sqlalchemy>=2",
+    "psycopg[binary]>=3",
+    "pydantic-settings",
+    "geopandas",
+    "shapely",
+    "scikit-learn",
+    "lightgbm",
+    "shap",
+    "onnx",
+    "onnxmltools",
+    "onnxruntime",
+    "matplotlib",
+]
+
+[dependency-groups]
+dev = [
+    "jupyterlab",
+    "pre-commit",
+    "pytest",
+    "ruff",
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-m 'not db'"
+markers = [
+    "db: needs a running Postgres reachable via DATABASE_URL (run with `make test-db`)",
+]

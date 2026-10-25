@@ -1,0 +1,28 @@
+# Secrets
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Data: everything except hand-maintained files
+/data/*
+!/data/manual/
+
+# Models: only model cards are committed
+/models/*/*
+!/models/*/model_card.md
+
+# Site
+node_modules/
+/site/public/data/
+/site/dist/
+
+# OS
+.DS_Store
