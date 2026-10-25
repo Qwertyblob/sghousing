@@ -197,6 +197,35 @@ and the distances differ by at most 75 m. OneMap measures to a single station
 point, which lies up to about 60 m from the exits these features use. It needs OneMap
 credentials.
 
+## Data quality
+
+`make check` runs `tests/test_data_quality.py` against the live database (after
+`make features`) and writes [`reports/data_quality.md`](reports/data_quality.md). The report is
+written before any assertion, so a failing run still explains itself, and it depends only on
+the data, so re-running it without new data changes nothing. The checks, defined in
+`pipeline/quality/checks.py`:
+
+| Check | Fails when |
+|---|---|
+| Row counts per year | A year has under half the previous year's sales. A partial year is scaled to 12 months first, and a year with no sales fails. |
+| Nulls | Any required column in `staging.hdb_resale` or `marts.resale_features` has a NULL. |
+| Ranges | `floor_area_sqm` is outside 25–300, `resale_price` is not above 0, or `storey_mid` is outside 1–60. |
+| Known values | A `flat_type` or `town` is not in the known list (7 flat types; HDB's 26 towns plus Lim Chu Kang). |
+| Geocode coverage | Under 99.5% of addresses are located, or any sale since 2015 is not. |
+| Feature coverage | The feature mart is missing sales, or a feature is NULL where it should be filled. |
+| Price outliers | Never: they are flagged, not failed. |
+
+Two judgement calls:
+
+- **Terrace houses.** Two sales are above 300 sqm. Both are HDB terrace houses in Whampoa,
+  whose floor area includes their land (366.7 sqm sold for $1.568M in 2024). Rows with
+  `flat_model = 'Terrace'` are allowed outside the floor-area range, and the report lists them.
+- **Price outliers.** A sale is flagged when its price per sqm is more than 4 median absolute
+  deviations from the median of its town, flat type and year. The MAD is unscaled, so 4 MADs
+  is about 2.7 standard deviations for normal data, and about 2.8% of sales are flagged.
+  Groups whose MAD is 0 (a few tiny groups) are not scored. The report gives counts by flat
+  type and the 25 most extreme sales.
+
 ## Data sources and licences
 
 Data from [data.gov.sg](https://data.gov.sg) is used under the

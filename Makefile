@@ -75,8 +75,8 @@ geocode: ## Geocode addresses via OneMap (needs ONEMAP_EMAIL/ONEMAP_PASSWORD)
 features: ## Build marts.block_features and marts.resale_features (PostGIS SQL)
 	uv run python -m pipeline.common.sql_runner '2*.sql'
 
-check: ## Data quality checks + report (Phase 5)
-	$(call not_implemented,5)
+check: ## Data quality checks; writes reports/data_quality.md (needs `make features`)
+	uv run pytest -m db tests/test_data_quality.py
 
 train: ## Train baselines and LightGBM models (Phase 7)
 	$(call not_implemented,7)
