@@ -66,8 +66,8 @@ endef
 ingest: ## Download data.gov.sg datasets into data/raw and load raw tables
 	uv run python -m pipeline.ingest
 
-transform: ## Run SQL staging transforms (Phase 2)
-	$(call not_implemented,2)
+transform: ## Run SQL staging transforms (raw -> staging)
+	uv run python -m pipeline.common.sql_runner '0*.sql' '1*.sql'
 
 geocode: ## Geocode addresses via OneMap (Phase 3)
 	$(call not_implemented,3)

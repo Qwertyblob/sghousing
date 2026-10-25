@@ -5,7 +5,8 @@ downloads official data, cleans and enriches it in Postgres + PostGIS, trains a 
 with an uncertainty range, and exports everything to a static site that runs predictions in
 the browser.
 
-> Status: **Phase 0 (setup)**. Pipeline stages are stubs until their phase lands.
+> Status: **Phase 2 (staging transforms)**. Later pipeline stages are stubs until their phase
+> lands.
 
 <!-- Screenshot: added in Phase 9 -->
 
@@ -99,6 +100,31 @@ that dataset's rows in a single transaction.
 3. Run `make ingest`. CSVs load as text columns and GeoJSON as `properties jsonb` plus
    `geometry_geojson text`, into `raw.ref_<key>`.
 
+## Staging transforms
+
+`make transform` runs the numbered SQL files in `pipeline/sql/` (`0*` then `1*`), turning
+`raw` text tables into typed `staging` tables. Every table is dropped and rebuilt, so
+re-running gives the same result. Parsers are strict: a value in a shape not seen before stops
+the build with an error instead of becoming NULL.
+
+`staging.hdb_resale` has one row per raw row (no de-duplication, because the source has no
+unit numbers, so identical-looking rows can be separate sales):
+
+- `txn_id` is `md5(source_dataset_id:source_row_number)`.
+- `date_basis` is `approval` before March 2012 and `registration` from then on, matching
+  HDB's change in what the month means.
+- `remaining_lease_months` is the reported value where the source has one (2015 onwards).
+  Otherwise it is computed as 99 years minus the months since January of the lease start year.
+  `remaining_lease_basis` records which.
+- `flat_type` merges `MULTI GENERATION` into `MULTI-GENERATION`. `flat_model` uses one
+  spelling per model, the mixed-case form where one exists (`MODEL A` becomes `Model A`).
+- `address_key` is `BLOCK STREET_NAME`, uppercased with whitespace collapsed, and matches
+  `staging.hdb_block_info.address_key`.
+
+Reference tables (`mrt_exits`, `planning_areas`, `hawker_centres`, `parks`, `schools`,
+`hdb_block_info`, `resale_price_index`) store geometry in SVY21 (EPSG:3414, metres) with GiST
+indexes. Schools have no coordinates in the source; they are geocoded in Phase 3.
+
 ## Data sources and licences
 
 Data from [data.gov.sg](https://data.gov.sg) is used under the
@@ -116,6 +142,11 @@ indicative only.
 
 - No supermarket proximity feature: data.gov.sg has no current supermarket location dataset
   (the only candidate is a June 2016 licence list without coordinates).
+- Before 2012 the lease start is a year only and the month is the approval date, so 51 sales
+  are dated before their lease start year. Their flat age is floored at 0 and their remaining
+  lease capped at 99 years.
+- `txn_id` depends on row order in the source files. If HDB re-issues a file with rows inserted
+  mid-file, IDs for later rows in that file change.
 
 <!-- Phase 7: model limitations -->
 
