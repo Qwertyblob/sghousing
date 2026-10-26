@@ -1,0 +1,223 @@
+{
+  "model_version": "2026-10",
+  "trained_on": "2026-10-26",
+  "data_window": {
+    "train_from": "2015-01-01",
+    "train_end": "2023-12",
+    "valid_end": "2024-12",
+    "fit_end": "2024-12",
+    "last_month": "2026-10"
+  },
+  "target": "log(resale_price)",
+  "input": {
+    "name": "input",
+    "dtype": "float32",
+    "missing": "NaN"
+  },
+  "features": [
+    {
+      "name": "town",
+      "kind": "categorical"
+    },
+    {
+      "name": "flat_type",
+      "kind": "categorical"
+    },
+    {
+      "name": "flat_model",
+      "kind": "categorical"
+    },
+    {
+      "name": "planning_area",
+      "kind": "categorical"
+    },
+    {
+      "name": "floor_area_sqm",
+      "kind": "numeric"
+    },
+    {
+      "name": "storey_mid",
+      "kind": "numeric"
+    },
+    {
+      "name": "rel_storey",
+      "kind": "numeric"
+    },
+    {
+      "name": "remaining_lease_months",
+      "kind": "numeric"
+    },
+    {
+      "name": "flat_age_years",
+      "kind": "numeric"
+    },
+    {
+      "name": "month_index",
+      "kind": "numeric"
+    },
+    {
+      "name": "lat",
+      "kind": "numeric"
+    },
+    {
+      "name": "lon",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_mrt_m",
+      "kind": "numeric"
+    },
+    {
+      "name": "n_mrt_exits_500m",
+      "kind": "numeric"
+    },
+    {
+      "name": "n_primary_schools_1km",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_nearest_primary_m",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_hawker_m",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_park_m",
+      "kind": "numeric"
+    },
+    {
+      "name": "dist_cbd_m",
+      "kind": "numeric"
+    },
+    {
+      "name": "block_max_floor",
+      "kind": "numeric"
+    },
+    {
+      "name": "block_year_completed",
+      "kind": "numeric"
+    },
+    {
+      "name": "town_psm_3m",
+      "kind": "numeric"
+    },
+    {
+      "name": "town_psm_6m",
+      "kind": "numeric"
+    },
+    {
+      "name": "town_psm_12m",
+      "kind": "numeric"
+    },
+    {
+      "name": "block_psm_24m",
+      "kind": "numeric"
+    },
+    {
+      "name": "block_sales_24m",
+      "kind": "numeric"
+    }
+  ],
+  "categories": {
+    "town": {
+      "ANG MO KIO": 0,
+      "BEDOK": 1,
+      "BISHAN": 2,
+      "BUKIT BATOK": 3,
+      "BUKIT MERAH": 4,
+      "BUKIT PANJANG": 5,
+      "BUKIT TIMAH": 6,
+      "CENTRAL AREA": 7,
+      "CHOA CHU KANG": 8,
+      "CLEMENTI": 9,
+      "GEYLANG": 10,
+      "HOUGANG": 11,
+      "JURONG EAST": 12,
+      "JURONG WEST": 13,
+      "KALLANG/WHAMPOA": 14,
+      "MARINE PARADE": 15,
+      "PASIR RIS": 16,
+      "PUNGGOL": 17,
+      "QUEENSTOWN": 18,
+      "SEMBAWANG": 19,
+      "SENGKANG": 20,
+      "SERANGOON": 21,
+      "TAMPINES": 22,
+      "TOA PAYOH": 23,
+      "WOODLANDS": 24,
+      "YISHUN": 25
+    },
+    "flat_type": {
+      "1 ROOM": 0,
+      "2 ROOM": 1,
+      "3 ROOM": 2,
+      "4 ROOM": 3,
+      "5 ROOM": 4,
+      "EXECUTIVE": 5,
+      "MULTI-GENERATION": 6
+    },
+    "flat_model": {
+      "2-room": 0,
+      "3Gen": 1,
+      "Adjoined flat": 2,
+      "Apartment": 3,
+      "DBSS": 4,
+      "Improved": 5,
+      "Improved-Maisonette": 6,
+      "Maisonette": 7,
+      "Model A": 8,
+      "Model A-Maisonette": 9,
+      "Model A2": 10,
+      "Multi Generation": 11,
+      "New Generation": 12,
+      "Premium Apartment": 13,
+      "Premium Apartment Loft": 14,
+      "Premium Maisonette": 15,
+      "Simplified": 16,
+      "Standard": 17,
+      "Terrace": 18,
+      "Type S1": 19,
+      "Type S2": 20
+    },
+    "planning_area": {
+      "ANG MO KIO": 0,
+      "BEDOK": 1,
+      "BISHAN": 2,
+      "BUKIT BATOK": 3,
+      "BUKIT MERAH": 4,
+      "BUKIT PANJANG": 5,
+      "BUKIT TIMAH": 6,
+      "CHANGI": 7,
+      "CHOA CHU KANG": 8,
+      "CLEMENTI": 9,
+      "DOWNTOWN CORE": 10,
+      "GEYLANG": 11,
+      "HOUGANG": 12,
+      "JURONG EAST": 13,
+      "JURONG WEST": 14,
+      "KALLANG": 15,
+      "MARINE PARADE": 16,
+      "NOVENA": 17,
+      "OUTRAM": 18,
+      "PASIR RIS": 19,
+      "PUNGGOL": 20,
+      "QUEENSTOWN": 21,
+      "ROCHOR": 22,
+      "SEMBAWANG": 23,
+      "SENGKANG": 24,
+      "SERANGOON": 25,
+      "TAMPINES": 26,
+      "TANGLIN": 27,
+      "TOA PAYOH": 28,
+      "WOODLANDS": 29,
+      "YISHUN": 30
+    }
+  },
+  "outputs": {
+    "p10": "model_p10.onnx",
+    "p50": "model_p50.onnx",
+    "p90": "model_p90.onnx"
+  }
+}
