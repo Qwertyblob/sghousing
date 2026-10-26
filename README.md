@@ -5,19 +5,41 @@ downloads official data, cleans and enriches it in Postgres + PostGIS, trains a 
 with an uncertainty range, and exports everything to a static site that runs predictions in
 the browser.
 
-> Status: **Phase 4 (spatial features)**. Later pipeline stages are stubs until their phase lands.
+**Live site: <https://qwertyblob.github.io/sghousing/>**
 
-<!-- Screenshot: added in Phase 9 -->
+![The Overview page: headline prices for the latest 12 months and the national monthly trend](docs/screenshot.png)
 
 ## Architecture
 
-<!-- Diagram: added as the pipeline takes shape -->
+```mermaid
+flowchart LR
+    gov[data.gov.sg<br/>datasets] -->|make ingest| raw[(raw)]
+    raw -->|make transform<br/>SQL| staging[(staging)]
+    onemap[OneMap<br/>search API] -->|make geocode| staging
+    staging -->|make features<br/>PostGIS SQL| marts[(marts)]
+    marts -->|make train / evaluate<br/>LightGBM, ONNX| models[models/&lt;version&gt;]
+    marts -->|make export| data[site/public/data<br/>JSON, GeoJSON, ONNX]
+    models -->|make export| data
+    data -->|make site-build<br/>Vite| dist[site/dist]
+    dist -->|make publish| pages[GitHub Pages<br/>gh-pages branch]
+    marts -.->|make snapshot| snap[data/snapshot<br/>Parquet + model]
+    snap -.->|GitHub release<br/>make restore-snapshot| marts
+```
+
+Postgres + PostGIS runs in Docker with three schemas: `raw` (downloads as published),
+`staging` (cleaned, typed and geocoded) and `marts` (features and aggregates). Python
+downloads, geocodes, trains and exports; whole-table transforms are SQL files in `sql/`. The
+site is static: charts and the map read the exported JSON, and Predict runs the ONNX models
+in the browser, so there is no server to run.
 
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (Compose v2)
 - [uv](https://docs.astral.sh/uv/) (installs Python 3.12 for you)
-- Node 22 LTS (for the site, Phase 9)
+- Node 22 LTS (for the site and the ONNX parity test)
+- For the full pipeline only: a free [OneMap API account](https://www.onemap.gov.sg/apidocs/register)
+- For the snapshot route only: the [GitHub CLI](https://cli.github.com/) (`gh`), or download
+  the release assets from the repository's Releases page by hand
 - GNU Make (macOS ships 3.81, which is fine; Windows: use WSL2)
 
 ### Apple Silicon
@@ -49,7 +71,37 @@ DATABASE_URL=postgresql+psycopg://sg:sg@localhost:55432/sg_housing
 
 Settings validation refuses to start if the two disagree.
 
-<!-- Full-pipeline and snapshot routes: added in Phase 10 -->
+### Route 1: full pipeline (from the official sources)
+
+Put your OneMap login in `.env` (`ONEMAP_EMAIL`, `ONEMAP_PASSWORD`; `make setup` created the
+file from `.env.example`). Then:
+
+```bash
+make all          # ingest, transform, geocode, features, check, train, evaluate, export
+make site-build   # tests and the static build in site/dist
+make site-dev     # or browse it at http://localhost:5173/sghousing/
+```
+
+`make all` starts from an empty database and needs no other manual step. Geocoding caches
+every address in `staging.geocode_cache`, so a rerun only looks up new addresses. Training
+picks the model version from the latest month of data, so a rerun on new data adds a
+version under `models/` rather than replacing one.
+
+### Route 2: from a data snapshot (no OneMap account, no training)
+
+Each snapshot is a GitHub release holding the `marts` tables, the export's other inputs and
+the trained model (see [Snapshots](#snapshots)). With `gh` installed:
+
+```bash
+gh release list --repo qwertyblob/sghousing          # pick the latest snapshot-YYYY-MM
+gh release download snapshot-2026-10 --repo qwertyblob/sghousing --dir data/snapshot
+make restore-snapshot   # load it into Postgres (replaces those tables) and restore the model
+make export
+make site-build
+```
+
+On an M2 MacBook this takes about two and a half minutes after the download (about 150 MB),
+and the exported site data is byte-identical to the export the snapshot was taken from.
 
 ## Make targets
 
@@ -71,8 +123,9 @@ Run `make help` for the current list.
 | `evaluate` | Test metrics, SHAP figures, model card, then the Node ONNX parity test |
 | `site-dev` | Serve the site at http://localhost:5173/sghousing/ with live reload (needs `make export` first) |
 | `site-build` | Site unit tests, type check, and the static build in `site/dist` |
-| `publish` | Deploy to GitHub Pages (Phase 10) |
-| `snapshot`, `restore-snapshot` | Parquet snapshot of marts tables (Phase 10) |
+| `publish` | `export`, then `site-build`, then push `site/dist` to the `gh-pages` branch (set `PAGES_REPO` to publish elsewhere) |
+| `snapshot` | Write the snapshot to `data/snapshot` and print the `gh release create` command to publish it |
+| `restore-snapshot` | Check a downloaded snapshot's checksums, load it into Postgres and restore its model |
 | `all` | Ingest through export, in order |
 | `clean` | Remove caches and build output (keeps data and DB) |
 
@@ -392,11 +445,62 @@ Lighthouse 13.5 (default mobile profile, simulated slow 4G, run against `vite pr
 the production build) scores every page 95–100 for performance and 100 for accessibility.
 `npm test` in `site/` runs the feature builder's unit tests (Node's built-in test runner).
 
+## Snapshots
+
+`make snapshot` writes `data/snapshot/` (about 150 MB, zstd Parquet):
+
+- every `marts` table, plus `staging.hdb_resale`, `staging.planning_areas` and
+  `raw.ingestion_log`. `make export` reads these three as well (recent sales, map
+  boundaries and source credits), so a snapshot of the marts alone could not rebuild the site.
+- the trained model as `model-<version>.tar.gz` (ONNX files, metrics and model card), so the
+  snapshot route skips training.
+- `manifest.json`: each table's columns and types, indexes and constraints, row count and
+  SHA-256, the model's SHA-256, the data's last month and the source credits.
+
+Column types are kept exactly (numerics as decimals, geometries as EWKB), and rows are
+written in a fixed order, so rerunning `make snapshot` on the same database gives
+byte-identical files. The command prints the `gh release create` command that publishes the
+snapshot as a release; it does not run it.
+
+`make restore-snapshot` verifies every checksum first and changes nothing if one fails. It
+then recreates each table with its indexes and constraints, loads the rows and installs the
+model as `models/LATEST`. Running it twice gives the same database.
+
+## Publishing
+
+`make publish` runs `export` and `site-build`, then pushes `site/dist` to the `gh-pages`
+branch with the [gh-pages](https://github.com/tschaub/gh-pages) package (adding
+`.nojekyll`). Git needs push access to the repository. GitHub Pages serves the branch
+(Settings → Pages → Deploy from a branch → `gh-pages`, `/ (root)`). If nothing changed,
+publishing again makes no new commit.
+
+Within GitHub Pages' limits: the published site is about 35 MB (limit 1 GB). Measured
+compressed transfers: the chart pages download about 0.6 MB, the map 0.3 MB more, and Predict
+about 12 MB on first use (the block index, the three models and the onnxruntime
+WebAssembly; the browser caches them). So the 100 GB a month soft bandwidth limit covers
+about 8,000 first-time Predict users, or about 100,000 visits that only browse the charts
+and map, a month.
+
 ## Data sources and licences
 
 Data from [data.gov.sg](https://data.gov.sg) is used under the
-[Singapore Open Data Licence](https://data.gov.sg/open-data-licence). Each source is credited
-on the site.
+[Singapore Open Data Licence version 1.0](https://data.gov.sg/open-data-licence). Each source
+is credited on the site's About page with its last update.
+
+| Source | data.gov.sg datasets |
+|---|---|
+| HDB resale flat prices | Five datasets covering 1990 to now (`d_ebc5ab87086db484f88045b47411ebc5`, `d_43f493c6c50d54243cc1eab0df142d6a`, `d_2d5ff9ea31397b66239f245f57751537`, `d_ea9ed51da2787afaf8e51f827c304208`, `d_8b84c4ee58e3cfc0ece0d773c8ca6abc`) |
+| HDB Property Information | `d_17f5382f26140b1fdae0ba2ef6239d2f` |
+| HDB Resale Price Index (1Q2009 = 100) | `d_14f63e595975691e7c24a27ae4c07c79` |
+| LTA MRT Station Exit | `d_b39d3a0871985372d7e1637193335da5` |
+| General information of schools (MOE) | `d_688b934f82c1059ed0a6993d2a829089` |
+| Hawker Centres (NEA) | `d_4a086da0a5553be1d89383cd90d07ecd` |
+| NParks Parks and Nature Reserves | `d_77d7ec97be83d44f61b85454f844382f` |
+| Master Plan 2019 Planning Area Boundary (No Sea) (URA) | `d_4765db0e87b9c86336792efe8a1f7a66` |
+
+Addresses are geocoded with the [OneMap search API](https://www.onemap.gov.sg/apidocs/),
+under OneMap's terms of use. Snapshots contain the geocoded coordinates, not OneMap
+responses.
 
 The resale data excludes non-market transactions such as sales between relatives. Prices are
 indicative only.

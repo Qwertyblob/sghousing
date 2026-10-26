@@ -6,6 +6,9 @@ COMPOSE ?= docker compose
 PSQL := $(COMPOSE) exec -T -e PGOPTIONS='-c client_min_messages=warning' db \
 	psql -U sg -d sg_housing -v ON_ERROR_STOP=1 -q
 
+# GitHub repository `make publish` pushes the gh-pages branch to.
+PAGES_REPO ?= https://github.com/qwertyblob/sghousing.git
+
 # Pipeline stages must never run concurrently (e.g. `make -j all`).
 .NOTPARALLEL:
 .DEFAULT_GOAL := help
@@ -57,11 +60,7 @@ lint: ## Ruff lint + format check
 	uv run ruff check .
 	uv run ruff format --check .
 
-# --- Pipeline (stubs fail until their phase is implemented) -------------------
-
-define not_implemented
-	@echo "make $@: not implemented yet (Phase $(1))" >&2; exit 1
-endef
+# --- Pipeline -----------------------------------------------------------------
 
 ingest: ## Download data.gov.sg datasets into data/raw and load raw tables
 	uv run python -m pipeline.ingest
@@ -106,14 +105,17 @@ site-dev: site-data site-deps ## Serve the site locally with live reload
 site-build: site-data site-deps ## Test, type-check and build the static site into site/dist
 	cd site && npm test && npm run build
 
-publish: ## Export, build and push site/dist to gh-pages (Phase 10)
-	$(call not_implemented,10)
+# --remove includes dotfiles: gh-pages creates a missing branch from the default branch's
+# checkout and its default removal skips dotfiles, so a .gitignore there would hide data/.
+publish: export site-build ## Export, build and push site/dist to the gh-pages branch
+	cd site && npx gh-pages --dist dist --remove '**/{*,.*}' --nojekyll --repo $(PAGES_REPO) \
+		--message "Publish $$(git rev-parse --short HEAD)"
 
-snapshot: ## Export marts tables to Parquet (Phase 10)
-	$(call not_implemented,10)
+snapshot: ## Write marts (and the export's inputs) and the model to data/snapshot; print the release command
+	uv run python -m pipeline.snapshot export
 
-restore-snapshot: ## Load a Parquet snapshot into Postgres (Phase 10)
-	$(call not_implemented,10)
+restore-snapshot: db-up ## Load data/snapshot into Postgres and restore its model (skips ingest to train)
+	uv run python -m pipeline.snapshot restore
 
 # --- Shortcuts ---------------------------------------------------------------
 

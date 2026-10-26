@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     models_dir: Path = REPO_ROOT / "models"
     site_data_dir: Path = REPO_ROOT / "site" / "public" / "data"
     site_schema_dir: Path = REPO_ROOT / "site" / "src" / "schemas"
+    snapshot_dir: Path = REPO_ROOT / "data" / "snapshot"
+    # owner/name on GitHub: snapshot release commands and the Pages site.
+    github_repo: str = "qwertyblob/sghousing"
 
     @field_validator("datagov_api_key", "onemap_email", "onemap_password", mode="before")
     @classmethod

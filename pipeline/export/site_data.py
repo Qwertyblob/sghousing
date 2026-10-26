@@ -413,22 +413,40 @@ def recent_sales(conn: Connection, end: date) -> dict[str, dict[str, Any]]:
     return by_town
 
 
-def sources(conn: Connection, data_dir: Path) -> list[dict[str, Any]]:
-    """Every loaded dataset, named from its snapshot metadata where the snapshot is present."""
+def _snapshot_credits(snapshot_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
+    """Dataset names and dates from a restored data snapshot's manifest, by (source, id)."""
+    manifest = snapshot_dir / "manifest.json"
+    if not manifest.exists():
+        return {}
+    credits = json.loads(manifest.read_text(encoding="utf-8")).get("sources", [])
+    return {(c["source"], c["dataset_id"]): c for c in credits}
+
+
+def sources(conn: Connection, settings: Settings) -> list[dict[str, Any]]:
+    """Every loaded dataset, named from its downloaded snapshot's metadata, or from a restored
+    data snapshot's manifest when the raw download is not on this machine."""
+    restored = _snapshot_credits(settings.snapshot_dir)
     out = []
     for source, dataset_id, downloaded_at in conn.execute(
         text("""SELECT source, dataset_id, max(downloaded_at)
                 FROM raw.ingestion_log GROUP BY 1, 2 ORDER BY 1, 2""")
     ):
-        current = read_current(data_dir / "raw" / source / dataset_id, verify_checksum=False)
+        current = read_current(
+            settings.data_dir / "raw" / source / dataset_id, verify_checksum=False
+        )
         metadata = current[0].metadata if current else None
+        credit = restored.get((source, dataset_id), {})
+        if metadata and metadata.name:
+            name, last_updated = metadata.name, metadata.last_updated_at
+        else:
+            name, last_updated = credit.get("name", dataset_id), credit.get("last_updated")
         out.append(
             {
                 "source": source,
                 "dataset_id": dataset_id,
-                "name": metadata.name if metadata and metadata.name else dataset_id,
+                "name": name,
                 "url": f"https://data.gov.sg/datasets/{dataset_id}/view",
-                "last_updated": metadata.last_updated_at if metadata else None,
+                "last_updated": last_updated,
                 "retrieved": downloaded_at,
             }
         )
@@ -465,7 +483,7 @@ def meta(
         "priced_for": f"{as_of:%Y-%m}",
         "model": model,
         "towns": [{"town": t, "file": f"recent/{town_slug(t)}.json"} for t in towns],
-        "sources": sources(conn, settings.data_dir),
+        "sources": sources(conn, settings),
         "licence": LICENCE,
         "geocoder": GEOCODER,
         "disclaimer": DISCLAIMER,
