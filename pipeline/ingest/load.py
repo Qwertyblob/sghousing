@@ -189,7 +189,9 @@ def _display_path(snap: Snapshot) -> str:
 def load_snapshot(engine: Engine, snap: Snapshot, *, table: str, schema: str = "raw") -> LoadResult:
     """Replace `snap.dataset_id`'s rows in `{schema}.{table}` with the snapshot's contents.
 
-    Skips (and changes nothing) when the snapshot hash equals the last logged load.
+    Skips (and changes nothing) when the snapshot hash equals the last logged load. A snapshot
+    with no data rows (a header-only CSV or an empty FeatureCollection) is a broken refresh,
+    not an empty dataset: it raises ParseError and the transaction keeps the existing rows.
     """
     with engine.begin() as conn:
         pg: psycopg.Connection = conn.connection.driver_connection  # same transaction
@@ -207,6 +209,11 @@ def load_snapshot(engine: Engine, snap: Snapshot, *, table: str, schema: str = "
                 count = _load_geojson(cur, schema, table, snap, ingested_at)
             else:
                 raise ValueError(f"unsupported format {snap.metadata.format}")
+            if count == 0:
+                raise ParseError(
+                    f"{snap.dataset_id}: {snap.path.name} has no data rows; "
+                    "keeping the previously loaded rows"
+                )
 
             cur.execute(
                 sql.SQL(

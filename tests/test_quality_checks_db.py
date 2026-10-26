@@ -179,8 +179,34 @@ def test_missing_or_empty_inputs_raise(fixture: tuple[Engine, Sources]) -> None:
         run_checks(engine, src)
 
 
+def test_price_outliers_use_scaled_mad(fixture: tuple[Engine, Sources]) -> None:
+    # Prices 1000-1002 give the largest group a median of 1001 and a MAD of 1. A sale 5 MADs
+    # out is 5 / 1.4826 = 3.4 scaled MADs (kept); one 7 MADs out is 4.7 (flagged).
+    engine, src = fixture
+    run_sql(
+        engine,
+        f"UPDATE {src.resale} SET price_psm = 1000 + (source_row_number % 3)",
+        f"""
+        WITH biggest AS (
+            SELECT town, flat_type FROM {src.resale}
+            GROUP BY town, flat_type ORDER BY count(*) DESC, town, flat_type LIMIT 1
+        ),
+        picked AS (
+            SELECT txn_id, row_number() OVER (ORDER BY txn_id) AS n
+            FROM {src.resale} JOIN biggest USING (town, flat_type)
+        )
+        UPDATE {src.resale} AS r SET price_psm = CASE p.n WHEN 1 THEN 1006 ELSE 1008 END
+        FROM picked AS p WHERE p.txn_id = r.txn_id AND p.n <= 2
+        """,
+    )
+    with engine.connect() as conn:
+        result = check_price_outliers(conn, src)
+    assert result.status == "flag"
+    assert result.summary.startswith("1 sales"), result.summary
+
+
 def test_no_price_outliers_is_valid(fixture: tuple[Engine, Sources]) -> None:
-    # Spread prices evenly around each group's centre so no sale is 4 MADs out.
+    # Spread prices evenly around each group's centre so no sale is 4 scaled MADs out.
     engine, src = fixture
     run_sql(engine, f"UPDATE {src.resale} SET price_psm = 1000 + (source_row_number % 3)")
     with engine.connect() as conn:

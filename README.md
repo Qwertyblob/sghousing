@@ -79,7 +79,9 @@ Run `make help` for the current list.
 dataset list is read from the collection metadata on each run) plus the reference datasets in
 `pipeline/ingest/reference.py`, and loads them into `raw` tables with every source value kept
 as text. Re-running is safe: unchanged files are skipped by SHA-256 and a changed file replaces
-that dataset's rows in a single transaction.
+that dataset's rows in a single transaction. A file with no data rows (a header-only CSV or
+an empty GeoJSON) is treated as a broken refresh: ingest fails and the rows already loaded
+are kept.
 
 - **API key (optional).** Set `DATAGOV_API_KEY` in `.env` for higher rate limits. It is sent
   only to the data.gov.sg API hosts, never to the storage URLs files are downloaded from.
@@ -227,9 +229,10 @@ Two judgement calls:
   whose floor area includes their land (366.7 sqm sold for $1.568M in 2024). Only Terrace
   sales in Kallang/Whampoa between 300 and 400 sqm are allowed, and the report lists them.
   Anything else outside 25–300 sqm fails, such as a terrace outside Whampoa or above 400 sqm.
-- **Price outliers.** A sale is flagged when its price per sqm is more than 4 median absolute
-  deviations from the median of its town, flat type and year. The MAD is unscaled, so 4 MADs
-  is about 2.7 standard deviations for normal data, and about 2.8% of sales are flagged.
+- **Price outliers.** A sale is flagged when its price per sqm is more than 4 scaled median
+  absolute deviations from the median of its town, flat type and year. The MAD is scaled by
+  1.4826 so that it estimates the standard deviation, which makes the limit about 4 robust
+  standard deviations.
   Groups whose MAD is 0 (a few tiny groups) are not scored. The report gives counts by flat
   type and the 25 most extreme sales.
 

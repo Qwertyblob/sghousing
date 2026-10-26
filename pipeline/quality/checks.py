@@ -161,9 +161,11 @@ LOCATION_FEATURES = (
 )
 # Block facts and derived columns: present for every sale.
 SALE_FEATURES = ("block_max_floor", "block_year_completed", "rel_storey", "month_index")
-# Price per sqm further than this many (unscaled) median absolute deviations from the median
-# of its town, flat type and year is flagged.
+# Price per sqm further than this many scaled median absolute deviations from the median of
+# its town, flat type and year is flagged. Scaling the MAD by 1.4826 makes it estimate the
+# standard deviation for normal data, so the limit is about 4 robust standard deviations.
 MAD_LIMIT = 4.0
+MAD_SCALE = 1.4826
 TOP_OUTLIERS = 25
 
 
@@ -502,8 +504,9 @@ def check_feature_coverage(conn: Connection, src: Sources) -> CheckResult:
 def check_price_outliers(conn: Connection, src: Sources) -> CheckResult:
     """Flag sales whose price per sqm is far from their town, flat type and year median.
 
-    The deviation is measured in unscaled median absolute deviations (MAD). Groups whose MAD
-    is 0 (a handful of tiny groups) cannot be scored and are skipped.
+    The deviation is measured in scaled median absolute deviations (MAD x MAD_SCALE, a
+    robust standard deviation). Groups whose MAD is 0 (a handful of tiny groups) cannot be
+    scored and are skipped.
     """
     conn.execute(text("DROP TABLE IF EXISTS pg_temp.price_deviation"))
     conn.execute(
@@ -531,7 +534,7 @@ def check_price_outliers(conn: Connection, src: Sources) -> CheckResult:
             FROM deviations
             GROUP BY town, flat_type, year
         )
-        SELECT d.*, a.mad, d.deviation / nullif(a.mad, 0) AS mads
+        SELECT d.*, a.mad, d.deviation / nullif(a.mad * {MAD_SCALE}, 0) AS mads
         FROM deviations AS d
         JOIN mads AS a USING (town, flat_type, year)
         """)
@@ -572,8 +575,9 @@ def check_price_outliers(conn: Connection, src: Sources) -> CheckResult:
     ).all()
     conn.execute(text("DROP TABLE pg_temp.price_deviation"))
     summary = (
-        f"{flagged:,} sales ({_pct(flagged, total)}) are more than {MAD_LIMIT:g} MADs from the "
-        f"median price per sqm of their town, flat type and year: {high:,} above, "
+        f"{flagged:,} sales ({_pct(flagged, total)}) are more than {MAD_LIMIT:g} scaled MADs "
+        f"(robust standard deviations) from the median price per sqm of their town, flat type "
+        f"and year: {high:,} above, "
         f"{flagged - high:,} below. They are flagged here and kept in the data. "
         f"{unscored_sales:,} sales in {unscored_groups:,} groups with a MAD of 0 are not scored."
     )
@@ -601,7 +605,7 @@ def check_price_outliers(conn: Connection, src: Sources) -> CheckResult:
                     "Price",
                     "Price per sqm",
                     "Group median",
-                    "MADs",
+                    "Scaled MADs",
                 ),
                 tuple(
                     (

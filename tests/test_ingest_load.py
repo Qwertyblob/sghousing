@@ -85,6 +85,42 @@ def test_changed_content_replaces_rows(
     ]
 
 
+@pytest.mark.parametrize(
+    ("name", "content", "fmt"),
+    [
+        ("header_only.csv", None, "CSV"),
+        ("empty.geojson", '{"type": "FeatureCollection", "features": []}', "GEOJSON"),
+    ],
+)
+def test_empty_refresh_keeps_existing_rows(
+    engine: Engine,
+    schema: str,
+    make_snapshot: MakeSnapshot,
+    tmp_path: Path,
+    name: str,
+    content: str | None,
+    fmt: str,
+) -> None:
+    if fmt == "CSV":
+        v1 = tmp_path / "v1.csv"
+        shutil.copy(FIXTURES / "resale_1990.csv", v1)
+        content = v1.read_text().splitlines(keepends=True)[0]  # the header line only
+    else:
+        v1 = tmp_path / "v1.geojson"
+        v1.write_text(
+            '{"type": "FeatureCollection", "features": [{"type": "Feature", '
+            '"properties": {"name": "a"}, "geometry": {"type": "Point", "coordinates": [0, 0]}}]}'
+        )
+    empty = tmp_path / name
+    empty.write_text(content)
+    load_snapshot(engine, make_snapshot(v1, "d_a", fmt=fmt), table="t", schema=schema)
+    with pytest.raises(ParseError, match="no data rows"):
+        load_snapshot(engine, make_snapshot(empty, "d_a", fmt=fmt), table="t", schema=schema)
+    expected = 3 if fmt == "CSV" else 1
+    assert fetch(engine, f'SELECT count(*) FROM "{schema}".t') == [(expected,)]
+    assert fetch(engine, f'SELECT row_count FROM "{schema}".ingestion_log') == [(expected,)]
+
+
 def test_column_sets_merge_across_datasets(
     engine: Engine, schema: str, make_snapshot: MakeSnapshot
 ) -> None:
