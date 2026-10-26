@@ -23,11 +23,11 @@ dependencies = [
     "onnxruntime",
     "matplotlib",
     "tqdm>=4.70.1",
+    "jsonschema>=4.26",
 ]
 
 [dependency-groups]
 dev = [
-    "jsonschema>=4.26",
     "jupyterlab",
     "pre-commit",
     "pytest",

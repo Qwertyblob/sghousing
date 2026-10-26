@@ -3,8 +3,7 @@
 Writes `site/public/data/` (settings.site_data_dir): minified JSON with ISO dates ("2026-10"
 for months, full ISO 8601 for timestamps). Large tables are columnar, {"columns": [...],
 "rows": [[...], ...]}, which keeps the whole directory under MAX_TOTAL_BYTES next to the
-models. Every file has a JSON Schema in `site/src/schemas/` (checked by `pytest -m
-site_data`, which `make export` runs).
+models. Every file has a JSON Schema in `site/src/schemas/` (settings.site_schema_dir).
 
 - meta.json: coverage, last refresh, model, towns, sources and licence
 - town_month.json: marts.agg_town_month from TOWN_MONTH_FROM, with 'ALL' rollups
@@ -15,8 +14,9 @@ site_data`, which `make export` runs).
 - recent/{town-slug}.json: the last RECENT_MONTHS months of sales in each town
 - model/: model_p10/p50/p90.onnx and features.json of the latest model
 
-The directory is built next to the old one and swapped in at the end, so a failed export
-leaves the previous files in place and files for vanished towns never linger.
+The directory is built next to the old one, validated (`validation_errors`: schemas, cross
+references, sizes) and only then swapped in, so a failed or invalid export leaves the previous
+files in place, and files for vanished towns never linger.
 """
 
 from __future__ import annotations
@@ -29,9 +29,11 @@ import sys
 import tempfile
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator, FormatChecker
 from sqlalchemy import Connection, text
 
 from config.settings import Settings, get_settings
@@ -60,6 +62,19 @@ LICENCE = {
 }
 GEOCODER = {"name": "OneMap search API", "url": "https://www.onemap.gov.sg/apidocs/"}
 DISCLAIMER = "Indicative only: statistical estimates from past resales, not valuations."
+# Schema (site_schema_dir/{name}.schema.json) of every fixed file; recent/*.json use "recent".
+SCHEMA_NAMES = {
+    "meta.json": "meta",
+    "town_month.json": "town_month",
+    "planning_areas.geojson": "planning_areas",
+    "lease_decay.json": "lease_decay",
+    "blocks.json": "blocks",
+    "model/features.json": "features",
+}
+
+
+class ExportError(RuntimeError):
+    """The built site data failed validation and was not published."""
 
 
 def _plain(value: Any) -> Any:
@@ -163,17 +178,26 @@ def planning_areas(conn: Connection) -> dict[str, Any]:
         features = []
         for row in conn.execute(
             text("""
-            SELECT ST_AsGeoJSON(
-                       ST_Transform(ST_SimplifyPreserveTopology(p.geom, :tolerance), 4326),
-                       :decimals) AS geometry,
+            WITH reduced AS (
+                -- Snapping to the output grid with ST_ReducePrecision keeps polygons valid;
+                -- rounding in ST_AsGeoJSON alone can make them self-intersect.
+                SELECT planning_area, ST_ReducePrecision(
+                           ST_Transform(ST_SimplifyPreserveTopology(geom, :tolerance), 4326),
+                           :grid) AS geom
+                FROM staging.planning_areas
+            )
+            SELECT ST_AsGeoJSON(p.geom, :decimals) AS geometry,
+                   ST_IsValid(p.geom) AND NOT ST_IsEmpty(p.geom) AS valid,
                    a.planning_area, a.region, a.sales_12m, a.median_psm_12m,
                    a.sales_prev_12m, a.median_psm_prev_12m, a.yoy_change
-            FROM staging.planning_areas AS p
+            FROM reduced AS p
             JOIN marts.agg_planning_area AS a USING (planning_area)
             ORDER BY a.planning_area"""),
-            {"tolerance": tolerance, "decimals": COORD_DECIMALS},
+            {"tolerance": tolerance, "grid": 10.0**-COORD_DECIMALS, "decimals": COORD_DECIMALS},
         ):
             props = dict(row._mapping)
+            if not props.pop("valid"):
+                raise RuntimeError(f"{props['planning_area']}: invalid geometry at {tolerance} m")
             geometry = json.loads(props.pop("geometry"))
             props["trend"] = trends.get(props["planning_area"], [])
             features.append({"type": "Feature", "geometry": geometry, "properties": props})
@@ -225,8 +249,9 @@ SELECT
     l.town,
     b.planning_area,
     b.region,
-    round(b.lat::numeric, 6) AS lat,
-    round(b.lon::numeric, 6) AS lon,
+    -- Model inputs are not rounded: a rounded value can fall on the other side of a split.
+    b.lat,
+    b.lon,
     l.lease_commence_year,
     -- HDB's reported remaining lease at the latest sale carried forward to :as_of, as the
     -- CLI does; the staging formula where none was reported.
@@ -250,7 +275,7 @@ SELECT
     b.dist_park_m,
     b.dist_cbd_m,
     CASE WHEN coalesce(r.block_sales_24m, 0) >= :min_block_sales
-         THEN round(r.block_psm_24m::numeric, 2) END AS block_psm_24m,
+         THEN r.block_psm_24m END AS block_psm_24m,
     coalesce(r.block_sales_24m, 0) AS block_sales_24m,
     fm.models::text AS flat_models
 FROM latest AS l
@@ -281,11 +306,11 @@ def blocks(conn: Connection, as_of: date) -> dict[str, Any]:
     for town, flat_type, m3, m6, m12 in conn.execute(
         text("""
         SELECT town, flat_type,
-               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
-                   FILTER (WHERE month >= :as_of - interval '3 months')::numeric, 2),
-               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
-                   FILTER (WHERE month >= :as_of - interval '6 months')::numeric, 2),
-               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)::numeric, 2)
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                   FILTER (WHERE month >= :as_of - interval '3 months'),
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                   FILTER (WHERE month >= :as_of - interval '6 months'),
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
         FROM staging.hdb_resale
         WHERE month >= :as_of - interval '12 months' AND month < :as_of
         GROUP BY 1, 2
@@ -399,6 +424,56 @@ def directory_bytes(directory: Path) -> int:
     return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
 
 
+def schema_name(relative: str) -> str | None:
+    """The schema a data file follows, from its path in the data directory (None: no schema,
+    as for the ONNX models)."""
+    if re.fullmatch(r"recent/[^/]+\.json", relative):
+        return "recent"
+    return SCHEMA_NAMES.get(relative)
+
+
+def validation_errors(directory: Path, schema_dir: Path) -> list[str]:
+    """Everything wrong with an export: missing files, files failing their JSON Schema, town
+    files and models that meta.json and features.json do not match, sizes over budget."""
+    errors = [f"{name}: missing" for name in SCHEMA_NAMES if not (directory / name).exists()]
+    validators: dict[str, Draft202012Validator] = {}
+    for path in sorted(p for p in directory.rglob("*") if p.is_file()):
+        relative = path.relative_to(directory).as_posix()
+        name = schema_name(relative)
+        if name is None:
+            continue
+        if name not in validators:
+            schema = json.loads((schema_dir / f"{name}.schema.json").read_text(encoding="utf-8"))
+            validators[name] = Draft202012Validator(schema, format_checker=FormatChecker())
+        found = validators[name].iter_errors(json.loads(path.read_text(encoding="utf-8")))
+        errors += [
+            f"{relative}: /{'/'.join(map(str, e.absolute_path))}: {e.message[:200]}"
+            for e in islice(found, 5)
+        ]
+    if errors:
+        return errors
+
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    listed = {t["file"] for t in meta["towns"]}
+    on_disk = {p.relative_to(directory).as_posix() for p in (directory / "recent").glob("*")}
+    errors += [f"{f}: listed in meta.json but missing" for f in sorted(listed - on_disk)]
+    errors += [f"{f}: not listed in meta.json" for f in sorted(on_disk - listed)]
+    spec = json.loads((directory / "model" / "features.json").read_text(encoding="utf-8"))
+    if meta["model"]["version"] != spec["model_version"]:
+        errors.append("meta.json: model version differs from model/features.json")
+    for file in spec["outputs"].values():
+        model = directory / "model" / file
+        if not model.exists() or model.stat().st_size == 0:
+            errors.append(f"model/{file}: missing or empty")
+    geojson = (directory / "planning_areas.geojson").stat().st_size
+    if geojson >= MAX_GEOJSON_BYTES:
+        errors.append(f"planning_areas.geojson: {geojson:,} bytes, over {MAX_GEOJSON_BYTES:,}")
+    total = directory_bytes(directory)
+    if total >= MAX_TOTAL_BYTES:
+        errors.append(f"site data is {total:,} bytes, over {MAX_TOTAL_BYTES:,}")
+    return errors
+
+
 def build(directory: Path, settings: Settings) -> None:
     """Write every site data file into `directory`."""
     model_dir = latest_model_dir(settings)
@@ -432,9 +507,11 @@ def run(settings: Settings) -> Path:
     staging = Path(tempfile.mkdtemp(prefix=".data.", dir=final.parent))
     try:
         build(staging, settings)
-        total = directory_bytes(staging)
-        if total >= MAX_TOTAL_BYTES:
-            raise RuntimeError(f"site data is {total:,} bytes, over {MAX_TOTAL_BYTES:,}")
+        errors = validation_errors(staging, settings.site_schema_dir)
+        if errors:
+            raise ExportError(
+                f"{len(errors)} problems; kept the current {final}:\n" + "\n".join(errors[:20])
+            )
         publish(staging, final)
     finally:
         shutil.rmtree(staging, ignore_errors=True)

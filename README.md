@@ -312,10 +312,12 @@ in training.
 ## Site data
 
 `make export` writes `site/public/data/` (generated, not committed). It builds the files
-next to the old directory and swaps them in, so a failed export leaves the previous files in
-place. It then validates every file against its JSON Schema (Draft 2020-12) in
-`site/src/schemas/` with `pytest -m site_data`, and checks the size budget: under 60 MB in
-total, and under 1 MB for the GeoJSON.
+next to the old directory and validates them before swapping them in. Validation checks
+every file against its JSON Schema (Draft 2020-12) in `site/src/schemas/`, checks that
+`meta.json` lists exactly the town files and models present, and checks the size budget:
+under 60 MB in total and under 1 MB for the GeoJSON. A failed or invalid export leaves the
+previous files in place. `make export` then reruns the same checks on the published
+directory with `pytest -m site_data`.
 
 | File | Contents |
 |---|---|
@@ -330,14 +332,18 @@ total, and under 1 MB for the GeoJSON.
 All files are minified JSON. Months are written as `"2026-10"` and timestamps as full ISO
 8601. Large tables are columnar, `{"columns": [...], "rows": [[...], ...]}`, rather than
 one object per row. The site turns a block and flat details into a model input from
-`blocks.json` alone: `tests/test_site_export.py` checks that a sample of its rows match what
-the CLI computes from the database.
+`blocks.json` alone. Model inputs (coordinates, distances, rolling medians) are written
+unrounded, because a rounded value can fall on the other side of a tree split.
+`tests/test_site_export.py` checks that a sample of rows match exactly what the CLI computes
+from the database. Planning area boundaries are snapped to a 1e-5 degree grid with
+`ST_ReducePrecision`, which keeps them valid; rounding coordinates alone made 6 of the 55
+self-intersect or collapse.
 
 `blocks.json` carries HDB's reported remaining lease forward to the month being priced
 (`as_of`). This is more accurate than recomputing it from the lease start year. For a later
 month, the site subtracts the months elapsed since `as_of`.
 
-The ONNX models account for most of the size (about 42 MB of 52 MB). The export removes
+The ONNX models account for most of the size (42 MB of 52 MB). The export removes
 the optional `nodes_hitrates` attribute from them, which saves 13%; predictions are
 unchanged and are checked on every export.
 

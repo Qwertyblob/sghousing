@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     reports_dir: Path = REPO_ROOT / "reports"
     models_dir: Path = REPO_ROOT / "models"
     site_data_dir: Path = REPO_ROOT / "site" / "public" / "data"
+    site_schema_dir: Path = REPO_ROOT / "site" / "src" / "schemas"
 
     @field_validator("datagov_api_key", "onemap_email", "onemap_password", mode="before")
     @classmethod

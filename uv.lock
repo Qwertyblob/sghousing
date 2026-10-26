@@ -1751,6 +1751,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "geopandas" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "lightgbm" },
     { name = "matplotlib" },
     { name = "onnx" },
@@ -1770,7 +1771,6 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "jsonschema" },
     { name = "jupyterlab" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1781,6 +1781,7 @@ dev = [
 requires-dist = [
     { name = "geopandas" },
     { name = "httpx" },
+    { name = "jsonschema", specifier = ">=4.26" },
     { name = "lightgbm" },
     { name = "matplotlib" },
     { name = "onnx" },
@@ -1800,7 +1801,6 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "jsonschema", specifier = ">=4.26" },
     { name = "jupyterlab" },
     { name = "pre-commit" },
     { name = "pytest" },
