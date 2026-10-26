@@ -87,5 +87,16 @@ darkQuery.addEventListener("change", () => {
 });
 
 updateToggle();
-window.addEventListener("hashchange", () => void route());
+// The skip link moves focus to the content; following its "#main" href would change the
+// hash, which the router would read as a route.
+document.querySelector<HTMLAnchorElement>(".skip-link")?.addEventListener("click", (event) => {
+  event.preventDefault();
+  main.focus();
+  main.scrollIntoView();
+});
+window.addEventListener("hashchange", () => {
+  // Only "#/..." hashes are routes; a plain fragment such as "#main" leaves the page as it is.
+  if (location.hash && !location.hash.startsWith("#/")) return;
+  void route();
+});
 void route();

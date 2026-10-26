@@ -79,8 +79,13 @@ export async function render(root: HTMLElement, params: URLSearchParams, signal:
       progressText.textContent = "Downloading the price models…";
       modelStatus.append(progress);
       modelsPromise = loadModels(spec, (loaded, total) => {
-        if (total) progress.max = total;
-        progress.value = loaded;
+        // Without a known total the bar is indeterminate rather than wrongly full.
+        if (total) {
+          progress.max = total;
+          progress.value = Math.min(loaded, total);
+        } else {
+          progress.removeAttribute("value");
+        }
         progressText.textContent = `Downloading the price models: ${(loaded / 1e6).toFixed(1)}${total ? ` of ${(total / 1e6).toFixed(1)}` : ""} MB…`;
       });
       modelsPromise.catch(() => (modelsPromise = null));
@@ -203,14 +208,20 @@ export async function render(root: HTMLElement, params: URLSearchParams, signal:
     return { value: sorted[sorted.length >> 1]!, where: here.length ? "at this block" : `in ${fmt.title(block.town)}` };
   }
 
+  // Each lookup may wait for a town's sales file; only the latest one may update the form,
+  // so a slow answer for an earlier block or flat type never overwrites the current one.
+  let areaRequest = 0;
   async function updateArea(): Promise<void> {
     if (!chosen) return;
-    const typical = await typicalArea(chosen, typeSelect.value);
+    const request = ++areaRequest;
+    const flatType = typeSelect.value;
+    const typical = await typicalArea(chosen, flatType);
+    if (request !== areaRequest || signal.aborted) return;
     if (!typical) {
       areaHint.textContent = "Floor area in square metres.";
       return;
     }
-    areaHint.textContent = `Typical ${fmt.flatType(typeSelect.value).toLowerCase()} flat ${typical.where}: ${typical.value} sqm.`;
+    areaHint.textContent = `Typical ${fmt.flatType(flatType).toLowerCase()} flat ${typical.where}: ${typical.value} sqm.`;
     if (!areaEdited) area.value = String(typical.value);
   }
 

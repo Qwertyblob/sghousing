@@ -21,7 +21,11 @@ type Progress = (loaded: number, total: number | null) => void;
 async function download(url: string, onBytes: (n: number) => void): Promise<{ bytes: Uint8Array; size: number | null }> {
   const response = await fetch(url);
   if (!response.ok || !response.body) throw new Error(`${url}: HTTP ${response.status}`);
-  const size = Number(response.headers.get("content-length")) || null;
+  // Content-Length counts bytes on the wire. A host that compresses the file again
+  // (Content-Encoding) hands the stream decoded bytes, which would overrun that total, so
+  // the size is then unknown rather than in different units from the bytes counted.
+  const encoding = response.headers.get("content-encoding");
+  const size = encoding && encoding !== "identity" ? null : Number(response.headers.get("content-length")) || null;
   const chunks: Uint8Array[] = [];
   const reader = response.body.getReader();
   for (;;) {
