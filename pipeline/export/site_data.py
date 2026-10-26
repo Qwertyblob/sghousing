@@ -1,0 +1,452 @@
+"""`python -m pipeline.export.site_data` (`make export`): data files for the website.
+
+Writes `site/public/data/` (settings.site_data_dir): minified JSON with ISO dates ("2026-10"
+for months, full ISO 8601 for timestamps). Large tables are columnar, {"columns": [...],
+"rows": [[...], ...]}, which keeps the whole directory under MAX_TOTAL_BYTES next to the
+models. Every file has a JSON Schema in `site/src/schemas/` (checked by `pytest -m
+site_data`, which `make export` runs).
+
+- meta.json: coverage, last refresh, model, towns, sources and licence
+- town_month.json: marts.agg_town_month from TOWN_MONTH_FROM, with 'ALL' rollups
+- planning_areas.geojson: simplified boundaries, marts.agg_planning_area and a yearly trend
+- lease_decay.json: marts.lease_decay_curve (bins with at least MIN_CURVE_SALES sales)
+- blocks.json: every located block with a resale since TRAIN_FROM, with its model inputs as
+  of the month after the latest data, plus town-level rolling medians and flat models
+- recent/{town-slug}.json: the last RECENT_MONTHS months of sales in each town
+- model/: model_p10/p50/p90.onnx and features.json of the latest model
+
+The directory is built next to the old one and swapped in at the end, so a failed export
+leaves the previous files in place and files for vanished towns never linger.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import shutil
+import sys
+import tempfile
+from datetime import date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import Connection, text
+
+from config.settings import Settings, get_settings
+from pipeline.common.db import get_engine
+from pipeline.common.log import setup_logging
+from pipeline.ingest.snapshots import read_current
+from pipeline.train.dataset import TRAIN_FROM
+from pipeline.train.predict import MIN_BLOCK_SALES, next_month
+from pipeline.train.train_lgbm import latest_model_dir, publish
+
+logger = logging.getLogger("pipeline.export")
+
+TOWN_MONTH_FROM = date(2000, 1, 1)
+RECENT_MONTHS = 24
+MIN_CURVE_SALES = 30
+MIN_TREND_SALES = 20
+# ST_SimplifyPreserveTopology tolerances (SVY21 metres), tried in order until the GeoJSON
+# fits in MAX_GEOJSON_BYTES.
+SIMPLIFY_TOLERANCES_M = (5, 10, 20, 40, 80)
+MAX_GEOJSON_BYTES = 1_000_000
+MAX_TOTAL_BYTES = 60_000_000
+COORD_DECIMALS = 5
+LICENCE = {
+    "name": "Singapore Open Data Licence version 1.0",
+    "url": "https://data.gov.sg/open-data-licence",
+}
+GEOCODER = {"name": "OneMap search API", "url": "https://www.onemap.gov.sg/apidocs/"}
+DISCLAIMER = "Indicative only: statistical estimates from past resales, not valuations."
+
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return int(value) if value == value.to_integral_value() else float(value)
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    raise TypeError(f"not JSON serialisable: {type(value).__name__}")
+
+
+def dumps(obj: Any) -> str:
+    """Minified JSON; NaN/Infinity are rejected rather than written as invalid JSON."""
+    return json.dumps(
+        obj, separators=(",", ":"), ensure_ascii=False, allow_nan=False, default=_plain
+    )
+
+
+def write_json(path: Path, obj: Any) -> int:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = dumps(obj).encode("utf-8")
+    path.write_bytes(payload)
+    return len(payload)
+
+
+def town_slug(town: str) -> str:
+    """File-name form of a town: "KALLANG/WHAMPOA" -> "kallang-whampoa"."""
+    return re.sub(r"[^a-z0-9]+", "-", town.lower()).strip("-")
+
+
+def display_label(block: str, street: str) -> str:
+    """'Blk 406A Ang Mo Kio Ave 10' from HDB's upper-case block and street."""
+    words = (w if w[0].isdigit() else w.capitalize() for w in street.split())
+    return f"Blk {block} {' '.join(words)}"
+
+
+def _rows(conn: Connection, sql: str, **params: Any) -> tuple[list[str], list[list[Any]]]:
+    result = conn.execute(text(sql), params)
+    return list(result.keys()), [list(r) for r in result]
+
+
+def table(conn: Connection, sql: str, **params: Any) -> dict[str, Any]:
+    columns, rows = _rows(conn, sql, **params)
+    return {"columns": columns, "rows": rows}
+
+
+def last_month(conn: Connection) -> date:
+    return conn.execute(text("SELECT max(month) FROM staging.hdb_resale")).scalar_one()
+
+
+def town_month(conn: Connection) -> dict[str, Any]:
+    return {
+        "from": f"{TOWN_MONTH_FROM:%Y-%m}",
+        **table(
+            conn,
+            """SELECT town, flat_type, to_char(month, 'YYYY-MM') AS month, sales,
+                      median_psm, median_price
+               FROM marts.agg_town_month
+               WHERE month >= :start
+               ORDER BY town, flat_type, month""",
+            start=TOWN_MONTH_FROM,
+        ),
+    }
+
+
+def lease_decay(conn: Connection) -> dict[str, Any]:
+    window = conn.execute(
+        text("""SELECT to_char(max(month) - interval '59 months', 'YYYY-MM'),
+                       to_char(max(month), 'YYYY-MM')
+                FROM marts.resale_features""")
+    ).one()
+    return {
+        "from": window[0],
+        "to": window[1],
+        "min_sales": MIN_CURVE_SALES,
+        **table(
+            conn,
+            """SELECT flat_type, lease_years, sales, median_psm, median_rel_psm
+               FROM marts.lease_decay_curve
+               WHERE sales >= :min_sales
+               ORDER BY flat_type, lease_years""",
+            min_sales=MIN_CURVE_SALES,
+        ),
+    }
+
+
+def planning_areas(conn: Connection) -> dict[str, Any]:
+    """Boundaries with statistics, simplified until the file fits in MAX_GEOJSON_BYTES."""
+    trends: dict[str, list[list[Any]]] = {}
+    for area, year, sales, psm in conn.execute(
+        text("""SELECT planning_area, extract(year FROM month)::integer, count(*),
+                       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)::numeric, 2)
+                FROM marts.resale_features
+                WHERE planning_area IS NOT NULL AND month >= :start
+                GROUP BY 1, 2
+                HAVING count(*) >= :min_sales
+                ORDER BY 1, 2"""),
+        {"start": TRAIN_FROM, "min_sales": MIN_TREND_SALES},
+    ):
+        trends.setdefault(area, []).append([year, sales, psm])
+    for tolerance in SIMPLIFY_TOLERANCES_M:
+        features = []
+        for row in conn.execute(
+            text("""
+            SELECT ST_AsGeoJSON(
+                       ST_Transform(ST_SimplifyPreserveTopology(p.geom, :tolerance), 4326),
+                       :decimals) AS geometry,
+                   a.planning_area, a.region, a.sales_12m, a.median_psm_12m,
+                   a.sales_prev_12m, a.median_psm_prev_12m, a.yoy_change
+            FROM staging.planning_areas AS p
+            JOIN marts.agg_planning_area AS a USING (planning_area)
+            ORDER BY a.planning_area"""),
+            {"tolerance": tolerance, "decimals": COORD_DECIMALS},
+        ):
+            props = dict(row._mapping)
+            geometry = json.loads(props.pop("geometry"))
+            props["trend"] = trends.get(props["planning_area"], [])
+            features.append({"type": "Feature", "geometry": geometry, "properties": props})
+        collection = {
+            "type": "FeatureCollection",
+            "simplify_tolerance_m": tolerance,
+            "trend_columns": ["year", "sales", "median_psm"],
+            "features": features,
+        }
+        size = len(dumps(collection).encode("utf-8"))
+        if size < MAX_GEOJSON_BYTES:
+            logger.info("Planning areas simplified at %d m: %s bytes", tolerance, f"{size:,}")
+            return collection
+    raise RuntimeError(f"planning areas exceed {MAX_GEOJSON_BYTES:,} bytes at every tolerance")
+
+
+# One row per located block with a resale since TRAIN_FROM, built as
+# pipeline.train.predict.build_features builds one flat (tests/test_site_export.py checks
+# that they agree): the latest sale gives town and lease; the building generation of that
+# lease gives the block facts; rolling block medians cover the 24 months before :as_of.
+_BLOCKS_SQL = """
+WITH latest AS (
+    SELECT DISTINCT ON (address_key)
+           address_key, block, street_name, town, lease_commence_year, month,
+           remaining_lease_months, remaining_lease_basis
+    FROM staging.hdb_resale
+    ORDER BY address_key, month DESC, txn_id
+),
+flat_models AS (
+    SELECT address_key, jsonb_object_agg(flat_type, flat_model ORDER BY flat_type) AS models
+    FROM (
+        SELECT address_key, flat_type, mode() WITHIN GROUP (ORDER BY flat_model) AS flat_model
+        FROM staging.hdb_resale
+        GROUP BY 1, 2
+    ) AS m
+    GROUP BY 1
+),
+block_rolling AS (
+    SELECT address_key, count(*)::integer AS block_sales_24m,
+           percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm) AS block_psm_24m
+    FROM staging.hdb_resale
+    WHERE month >= :as_of - interval '24 months' AND month < :as_of
+    GROUP BY 1
+)
+SELECT
+    l.address_key,
+    l.block,
+    l.street_name,
+    l.town,
+    b.planning_area,
+    b.region,
+    round(b.lat::numeric, 6) AS lat,
+    round(b.lon::numeric, 6) AS lon,
+    l.lease_commence_year,
+    -- HDB's reported remaining lease at the latest sale carried forward to :as_of, as the
+    -- CLI does; the staging formula where none was reported.
+    least(greatest(
+        CASE WHEN l.remaining_lease_basis = 'reported'
+             THEN l.remaining_lease_months
+                  - ((extract(year FROM :as_of) - extract(year FROM l.month)) * 12
+                     + extract(month FROM :as_of) - extract(month FROM l.month))::integer
+             ELSE 99 * 12 - greatest(0, (extract(year FROM :as_of)::integer
+                                         - l.lease_commence_year) * 12
+                                        + extract(month FROM :as_of)::integer - 1)
+        END, 0), 99 * 12) AS remaining_lease_months,
+    g.block_max_floor,
+    g.block_year_completed,
+    b.dist_mrt_m,
+    b.nearest_mrt_name,
+    b.n_mrt_exits_500m,
+    b.n_primary_schools_1km,
+    b.dist_nearest_primary_m,
+    b.dist_hawker_m,
+    b.dist_park_m,
+    b.dist_cbd_m,
+    CASE WHEN coalesce(r.block_sales_24m, 0) >= :min_block_sales
+         THEN round(r.block_psm_24m::numeric, 2) END AS block_psm_24m,
+    coalesce(r.block_sales_24m, 0) AS block_sales_24m,
+    fm.models::text AS flat_models
+FROM latest AS l
+JOIN marts.block_features AS b USING (address_key)
+JOIN marts.block_generations AS g
+  ON g.address_key = l.address_key
+ AND l.lease_commence_year BETWEEN g.lease_year_from AND g.lease_year_to
+LEFT JOIN block_rolling AS r ON r.address_key = l.address_key
+JOIN flat_models AS fm ON fm.address_key = l.address_key
+WHERE l.month >= :train_from
+ORDER BY l.town, l.street_name, l.block
+"""
+
+
+def blocks(conn: Connection, as_of: date) -> dict[str, Any]:
+    """Model inputs per block as of `as_of`, plus town-level rolling medians and flat models."""
+    columns, rows = _rows(
+        conn, _BLOCKS_SQL, as_of=as_of, train_from=TRAIN_FROM, min_block_sales=MIN_BLOCK_SALES
+    )
+    models_at = columns.index("flat_models")
+    label_at = columns.index("street_name") + 1
+    for row in rows:
+        row[models_at] = json.loads(row[models_at])
+        row.insert(label_at, display_label(row[1], row[2]))
+    columns.insert(label_at, "label")
+
+    town_rolling: dict[str, dict[str, list[Any]]] = {}
+    for town, flat_type, m3, m6, m12 in conn.execute(
+        text("""
+        SELECT town, flat_type,
+               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                   FILTER (WHERE month >= :as_of - interval '3 months')::numeric, 2),
+               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                   FILTER (WHERE month >= :as_of - interval '6 months')::numeric, 2),
+               round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)::numeric, 2)
+        FROM staging.hdb_resale
+        WHERE month >= :as_of - interval '12 months' AND month < :as_of
+        GROUP BY 1, 2
+        ORDER BY 1, 2"""),
+        {"as_of": as_of},
+    ):
+        town_rolling.setdefault(town, {})[flat_type] = [m3, m6, m12]
+    town_flat_model: dict[str, dict[str, str]] = {}
+    for town, flat_type, model in conn.execute(
+        text("""SELECT town, flat_type, mode() WITHIN GROUP (ORDER BY flat_model)
+                FROM staging.hdb_resale GROUP BY 1, 2 ORDER BY 1, 2""")
+    ):
+        town_flat_model.setdefault(town, {})[flat_type] = model
+    return {
+        "as_of": f"{as_of:%Y-%m}",
+        "town_rolling_columns": ["town_psm_3m", "town_psm_6m", "town_psm_12m"],
+        "town_rolling": town_rolling,
+        "town_flat_model": town_flat_model,
+        "columns": columns,
+        "rows": rows,
+    }
+
+
+def recent_sales(conn: Connection, end: date) -> dict[str, dict[str, Any]]:
+    """The last RECENT_MONTHS months of sales (to `end`), keyed by town."""
+    columns, rows = _rows(
+        conn,
+        """SELECT town, to_char(month, 'YYYY-MM') AS month, block, street_name, flat_type,
+                  flat_model, storey_lo, storey_hi, floor_area_sqm, lease_commence_year,
+                  resale_price
+           FROM staging.hdb_resale
+           WHERE month > :end - make_interval(months => :months)
+           ORDER BY town, month DESC, street_name, block, txn_id""",
+        end=end,
+        months=RECENT_MONTHS,
+    )
+    first = conn.execute(
+        text("SELECT to_char(:end - make_interval(months => :months - 1), 'YYYY-MM')"),
+        {"end": end, "months": RECENT_MONTHS},
+    ).scalar_one()
+    by_town: dict[str, dict[str, Any]] = {}
+    for town, *values in rows:
+        entry = by_town.setdefault(
+            town,
+            {"town": town, "from": first, "to": f"{end:%Y-%m}", "columns": columns[1:], "rows": []},
+        )
+        entry["rows"].append(values)
+    return by_town
+
+
+def sources(conn: Connection, data_dir: Path) -> list[dict[str, Any]]:
+    """Every loaded dataset, named from its snapshot metadata where the snapshot is present."""
+    out = []
+    for source, dataset_id, downloaded_at in conn.execute(
+        text("""SELECT source, dataset_id, max(downloaded_at)
+                FROM raw.ingestion_log GROUP BY 1, 2 ORDER BY 1, 2""")
+    ):
+        current = read_current(data_dir / "raw" / source / dataset_id, verify_checksum=False)
+        metadata = current[0].metadata if current else None
+        out.append(
+            {
+                "source": source,
+                "dataset_id": dataset_id,
+                "name": metadata.name if metadata and metadata.name else dataset_id,
+                "url": f"https://data.gov.sg/datasets/{dataset_id}/view",
+                "last_updated": metadata.last_updated_at if metadata else None,
+                "retrieved": downloaded_at,
+            }
+        )
+    return out
+
+
+def meta(
+    conn: Connection, settings: Settings, model_dir: Path, towns: list[str], as_of: date
+) -> dict[str, Any]:
+    first, last, count = conn.execute(
+        text("SELECT min(month), max(month), count(*) FROM staging.hdb_resale")
+    ).one()
+    refreshed = conn.execute(text("SELECT max(downloaded_at) FROM raw.ingestion_log")).scalar_one()
+    spec = json.loads((model_dir / "features.json").read_text(encoding="utf-8"))
+    model: dict[str, Any] = {
+        "version": spec["model_version"],
+        "trained_on": spec["trained_on"],
+        "data_window": spec["data_window"],
+    }
+    metrics_path = model_dir / "metrics.json"
+    if metrics_path.exists():
+        test = json.loads(metrics_path.read_text(encoding="utf-8"))["test"]
+        p50 = test["lightgbm_p50"]
+        model["test"] = {
+            "sales": p50["n"],
+            "mae": round(p50["mae"]),
+            "mape": round(p50["mape"], 4),
+            "r2": round(p50["r2"], 4),
+            "interval_80_coverage": round(test["interval_80_coverage"], 4),
+        }
+    return {
+        "coverage": {"from": f"{first:%Y-%m}", "to": f"{last:%Y-%m}", "transactions": count},
+        "last_refresh": refreshed,
+        "priced_for": f"{as_of:%Y-%m}",
+        "model": model,
+        "towns": [{"town": t, "file": f"recent/{town_slug(t)}.json"} for t in towns],
+        "sources": sources(conn, settings.data_dir),
+        "licence": LICENCE,
+        "geocoder": GEOCODER,
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def directory_bytes(directory: Path) -> int:
+    return sum(p.stat().st_size for p in directory.rglob("*") if p.is_file())
+
+
+def build(directory: Path, settings: Settings) -> None:
+    """Write every site data file into `directory`."""
+    model_dir = latest_model_dir(settings)
+    engine = get_engine()
+    try:
+        with engine.connect() as conn:
+            end = last_month(conn)
+            as_of = next_month(end)
+            write_json(directory / "town_month.json", town_month(conn))
+            write_json(directory / "lease_decay.json", lease_decay(conn))
+            write_json(directory / "planning_areas.geojson", planning_areas(conn))
+            write_json(directory / "blocks.json", blocks(conn, as_of))
+            recent = recent_sales(conn, end)
+            for town, payload in recent.items():
+                write_json(directory / "recent" / f"{town_slug(town)}.json", payload)
+            write_json(
+                directory / "meta.json", meta(conn, settings, model_dir, sorted(recent), as_of)
+            )
+    finally:
+        engine.dispose()
+    spec = json.loads((model_dir / "features.json").read_text(encoding="utf-8"))
+    (directory / "model").mkdir()
+    for file in (*spec["outputs"].values(), "features.json"):
+        shutil.copyfile(model_dir / file, directory / "model" / file)
+
+
+def run(settings: Settings) -> Path:
+    """Build the site data next to the current directory and swap it in."""
+    final = settings.site_data_dir
+    final.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".data.", dir=final.parent))
+    try:
+        build(staging, settings)
+        total = directory_bytes(staging)
+        if total >= MAX_TOTAL_BYTES:
+            raise RuntimeError(f"site data is {total:,} bytes, over {MAX_TOTAL_BYTES:,}")
+        publish(staging, final)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    logger.info("Wrote %s (%s bytes)", final, f"{directory_bytes(final):,}")
+    return final
+
+
+def main() -> int:
+    setup_logging()
+    run(get_settings())
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

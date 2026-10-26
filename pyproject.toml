@@ -27,6 +27,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "jsonschema>=4.26",
     "jupyterlab",
     "pre-commit",
     "pytest",
@@ -46,9 +47,10 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-m 'not db and not parity'"
+addopts = "-m 'not db and not parity and not site_data'"
 markers = [
     "db: needs a running Postgres reachable via DATABASE_URL (run with `make test-db`)",
     "quality: data quality gate on the built pipeline (run with `make check`)",
     "parity: Node vs Python onnxruntime on the trained model (run with `make evaluate`)",
+    "site_data: exported site files against their JSON Schemas (run with `make export`)",
 ]

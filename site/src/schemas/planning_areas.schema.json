@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "planning_areas.geojson",
+  "description": "URA planning area boundaries (WGS84, simplified) with resale statistics.",
+  "type": "object",
+  "required": [
+    "type",
+    "features",
+    "simplify_tolerance_m",
+    "trend_columns"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "const": "FeatureCollection"
+    },
+    "simplify_tolerance_m": {
+      "type": "number"
+    },
+    "trend_columns": {
+      "const": [
+        "year",
+        "sales",
+        "median_psm"
+      ]
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "type",
+          "geometry",
+          "properties"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "Feature"
+          },
+          "geometry": {
+            "type": "object",
+            "required": [
+              "type",
+              "coordinates"
+            ],
+            "properties": {
+              "type": {
+                "enum": [
+                  "Polygon",
+                  "MultiPolygon"
+                ]
+              },
+              "coordinates": {
+                "type": "array"
+              }
+            }
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "planning_area",
+              "region",
+              "sales_12m",
+              "median_psm_12m",
+              "sales_prev_12m",
+              "median_psm_prev_12m",
+              "yoy_change",
+              "trend"
+            ],
+            "properties": {
+              "planning_area": {
+                "type": "string"
+              },
+              "region": {
+                "type": "string"
+              },
+              "sales_12m": {
+                "type": "integer"
+              },
+              "median_psm_12m": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "sales_prev_12m": {
+                "type": "integer"
+              },
+              "median_psm_prev_12m": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "yoy_change": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "trend": {
+                "type": "array",
+                "items": {
+                  "type": "array",
+                  "prefixItems": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    }
+                  ],
+                  "minItems": 3,
+                  "maxItems": 3
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

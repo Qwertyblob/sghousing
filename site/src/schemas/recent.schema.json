@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "recent/{town}.json",
+  "description": "The last 24 months of sales in one town, newest first.",
+  "type": "object",
+  "required": [
+    "columns",
+    "rows",
+    "town",
+    "from",
+    "to"
+  ],
+  "properties": {
+    "columns": {
+      "const": [
+        "month",
+        "block",
+        "street_name",
+        "flat_type",
+        "flat_model",
+        "storey_lo",
+        "storey_hi",
+        "floor_area_sqm",
+        "lease_commence_year",
+        "resale_price"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}$"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "minItems": 10,
+        "maxItems": 10
+      }
+    },
+    "town": {
+      "type": "string"
+    },
+    "from": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    },
+    "to": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    }
+  },
+  "additionalProperties": false
+}

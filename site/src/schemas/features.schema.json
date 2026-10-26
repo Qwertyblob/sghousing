@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "model/features.json",
+  "description": "How to build the ONNX model input: feature order, kinds and category codes.",
+  "type": "object",
+  "required": [
+    "model_version",
+    "trained_on",
+    "data_window",
+    "target",
+    "input",
+    "features",
+    "categories",
+    "outputs"
+  ],
+  "properties": {
+    "model_version": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    },
+    "trained_on": {
+      "type": "string"
+    },
+    "data_window": {
+      "type": "object"
+    },
+    "target": {
+      "const": "log(resale_price)"
+    },
+    "input": {
+      "type": "object",
+      "required": [
+        "name",
+        "dtype",
+        "missing"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "dtype": {
+          "const": "float32"
+        },
+        "missing": {
+          "const": "NaN"
+        }
+      }
+    },
+    "features": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "categorical",
+              "numeric"
+            ]
+          }
+        }
+      }
+    },
+    "categories": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "outputs": {
+      "type": "object",
+      "required": [
+        "p10",
+        "p50",
+        "p90"
+      ],
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^model_p[0-9]+\\.onnx$"
+      }
+    }
+  }
+}

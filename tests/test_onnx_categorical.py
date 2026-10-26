@@ -11,6 +11,7 @@ from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
+import onnx
 import pandas as pd
 import pytest
 
@@ -117,6 +118,14 @@ def test_shift_model_moves_every_prediction(
     assert np.allclose(shifted.predict(x), boosters["p90"].predict(x) + 0.07, rtol=0, atol=1e-12)
     export_onnx.export_model(shifted, export_onnx.onnx_path(tmp_path, "p90"))
     assert export_onnx.check_onnx({"p90": shifted}, tmp_path, x) < 1e-5
+
+
+def test_export_drops_unit_hitrates(models: tuple[dict[str, lgb.Booster], Path]) -> None:
+    _, directory = models
+    model = onnx.load(str(export_onnx.onnx_path(directory, "p50")))
+    names = {a.name for node in model.graph.node for a in node.attribute}
+    assert "nodes_values" in names
+    assert "nodes_hitrates" not in names
 
 
 def test_check_onnx_rejects_non_finite_predictions(

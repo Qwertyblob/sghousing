@@ -64,7 +64,8 @@ Run `make help` for the current list.
 | `db-check` | Connect from Python via `DATABASE_URL`, check PostGIS and schemas |
 | `test` / `test-db` | Unit tests / database integration tests |
 | `lint` | Ruff lint and format check |
-| `ingest` … `export` | Pipeline stages (Phases 1–8) |
+| `ingest` … `features` | Pipeline stages (Phases 1–4) |
+| `export` | Site data and models to `site/public/data`, validated against `site/src/schemas` |
 | `eda` | Run the EDA notebooks and save their figures (outputs are not written back) |
 | `train` | Baselines, tuning, calibration and final LightGBM models; ONNX export to `models/<version>` |
 | `evaluate` | Test metrics, SHAP figures, model card, then the Node ONNX parity test |
@@ -307,6 +308,38 @@ the rolling medians for the month after the latest data, and prints p10, p50 and
 storey is mapped to the middle of its 3-storey range, as the data records it.
 `tests/test_predict_db.py` checks that the CLI rebuilds recorded sales' features exactly as
 in training.
+
+## Site data
+
+`make export` writes `site/public/data/` (generated, not committed). It builds the files
+next to the old directory and swaps them in, so a failed export leaves the previous files in
+place. It then validates every file against its JSON Schema (Draft 2020-12) in
+`site/src/schemas/` with `pytest -m site_data`, and checks the size budget: under 60 MB in
+total, and under 1 MB for the GeoJSON.
+
+| File | Contents |
+|---|---|
+| `meta.json` | Coverage, last refresh, the month being priced, model version and test metrics, town file list, sources, licence, geocoder credit, disclaimer |
+| `town_month.json` | `marts.agg_town_month` from 2000: sales, median price per sqm and median price by town, flat type and month, with `ALL` rollups |
+| `planning_areas.geojson` | URA planning areas simplified with `ST_SimplifyPreserveTopology` (5 m): 12-month median price per sqm, the previous 12 months, year-on-year change (only where both windows have at least 20 sales), and a yearly trend from 2015 |
+| `lease_decay.json` | `marts.lease_decay_curve`: median price per sqm, and relative to its town, flat type and year, by whole years of remaining lease over the latest 5 years (bins with at least 30 sales) |
+| `blocks.json` | Every located block with a resale since 2015 and its model inputs for the month being priced: lease, building, distances and the 24-month block median. Also town-level 3/6/12-month medians and the usual flat model for each town and flat type |
+| `recent/{town}.json` | The last 24 months of sales in a town |
+| `model/` | `model_p10/p50/p90.onnx` and `features.json` of the latest model |
+
+All files are minified JSON. Months are written as `"2026-10"` and timestamps as full ISO
+8601. Large tables are columnar, `{"columns": [...], "rows": [[...], ...]}`, rather than
+one object per row. The site turns a block and flat details into a model input from
+`blocks.json` alone: `tests/test_site_export.py` checks that a sample of its rows match what
+the CLI computes from the database.
+
+`blocks.json` carries HDB's reported remaining lease forward to the month being priced
+(`as_of`). This is more accurate than recomputing it from the lease start year. For a later
+month, the site subtracts the months elapsed since `as_of`.
+
+The ONNX models account for most of the size (about 42 MB of 52 MB). The export removes
+the optional `nodes_hitrates` attribute from them, which saves 13%; predictions are
+unchanged and are checked on every export.
 
 ## Data sources and licences
 

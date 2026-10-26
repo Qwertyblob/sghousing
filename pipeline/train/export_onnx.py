@@ -19,6 +19,7 @@ from typing import Any
 
 import lightgbm as lgb
 import numpy as np
+import onnx
 import onnxruntime as ort
 import pandas as pd
 from onnxmltools import convert_lightgbm
@@ -75,8 +76,22 @@ def export_model(booster: lgb.Booster, path: Path) -> Path:
         target_opset=TARGET_OPSET,
         zipmap=False,
     )
+    _drop_unit_hitrates(model)
     path.write_bytes(model.SerializeToString())
     return path
+
+
+def _drop_unit_hitrates(model: onnx.ModelProto) -> None:
+    """Remove `nodes_hitrates` from tree ensembles when every value is 1.0.
+
+    The attribute is optional, only a hint, and ignored by onnxruntime; the converter writes
+    it for every node, about 13% of the file (3.8 MB of the p10 model), which the site has to
+    download. Predictions are unchanged (`check_onnx` verifies every export).
+    """
+    for node in model.graph.node:
+        rates = [a for a in node.attribute if a.name == "nodes_hitrates"]
+        if rates and all(v == 1.0 for v in rates[0].floats):
+            node.attribute.remove(rates[0])
 
 
 def session(path: Path) -> ort.InferenceSession:

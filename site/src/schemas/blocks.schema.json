@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "blocks.json",
+  "description": "Model inputs per block as of the pricing month, with town-level rolling medians and flat models (fallbacks when a block has no sale of a flat type).",
+  "type": "object",
+  "required": [
+    "columns",
+    "rows",
+    "as_of",
+    "town_rolling_columns",
+    "town_rolling",
+    "town_flat_model"
+  ],
+  "properties": {
+    "columns": {
+      "const": [
+        "address_key",
+        "block",
+        "street_name",
+        "label",
+        "town",
+        "planning_area",
+        "region",
+        "lat",
+        "lon",
+        "lease_commence_year",
+        "remaining_lease_months",
+        "block_max_floor",
+        "block_year_completed",
+        "dist_mrt_m",
+        "nearest_mrt_name",
+        "n_mrt_exits_500m",
+        "n_primary_schools_1km",
+        "dist_nearest_primary_m",
+        "dist_hawker_m",
+        "dist_park_m",
+        "dist_cbd_m",
+        "block_psm_24m",
+        "block_sales_24m",
+        "flat_models"
+      ]
+    },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "number",
+            "minimum": 1.1,
+            "maximum": 1.5
+          },
+          {
+            "type": "number",
+            "minimum": 103.5,
+            "maximum": 104.1
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1188
+          },
+          {
+            "type": "integer",
+            "minimum": 1
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": {
+              "type": "string"
+            }
+          }
+        ],
+        "minItems": 24,
+        "maxItems": 24
+      }
+    },
+    "as_of": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    },
+    "town_rolling_columns": {
+      "const": [
+        "town_psm_3m",
+        "town_psm_6m",
+        "town_psm_12m"
+      ]
+    },
+    "town_rolling": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "prefixItems": [
+            {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            {
+              "type": [
+                "number",
+                "null"
+              ]
+            },
+            {
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          ],
+          "minItems": 3,
+          "maxItems": 3
+        }
+      }
+    },
+    "town_flat_model": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

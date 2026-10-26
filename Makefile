@@ -90,8 +90,9 @@ evaluate: ## Test-set metrics, SHAP figures, model card, then the Node ONNX pari
 	cd tests/parity && npm ci --no-audit --no-fund
 	uv run pytest -m parity
 
-export: ## Export site data and ONNX models (Phase 8)
-	$(call not_implemented,8)
+export: ## Export site data and ONNX models to site/public/data, then validate them
+	uv run python -m pipeline.export.site_data
+	uv run pytest -m site_data
 
 site-dev: ## Serve the site locally (Phase 9)
 	$(call not_implemented,9)
