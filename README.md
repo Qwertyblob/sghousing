@@ -66,6 +66,8 @@ Run `make help` for the current list.
 | `lint` | Ruff lint and format check |
 | `ingest` … `export` | Pipeline stages (Phases 1–8) |
 | `eda` | Run the EDA notebooks and save their figures (outputs are not written back) |
+| `train` | Baselines, tuning, calibration and final LightGBM models; ONNX export to `models/<version>` |
+| `evaluate` | Test metrics, SHAP figures, model card, then the Node ONNX parity test |
 | `site-dev`, `site-build`, `publish` | Website (Phases 9–10) |
 | `snapshot`, `restore-snapshot` | Parquet snapshot of marts tables (Phase 10) |
 | `all` | Ingest through export, in order |
@@ -249,6 +251,60 @@ so re-running on the same data rewrites identical files. The findings are in
 
 To explore interactively, run `uv run jupyter lab`, then clear outputs before committing.
 
+## Modelling
+
+`make train` (`pipeline/train/train_lgbm.py`) fits models on sales from 2015 onwards, split by
+month: training up to `TRAIN_END` (2023-12), validation up to `VALID_END` (2024-12), and test
+after that.
+
+- **Target and features.** The target is `log(resale_price)`. Categorical features are town,
+  flat type, flat model and planning area, as fixed integer codes stored in `features.json`
+  and handled by LightGBM's native categorical splits (`tests/test_onnx_categorical.py`
+  checks that ONNX supports them). Numeric features are the flat, block and location features
+  plus leak-free rolling medians. `pipeline/sql/205_marts_rolling_features.sql` computes the
+  town and flat type median price per sqm over the 3, 6 and 12 months before the sale, and
+  the block's median and count over 24 months. `tests/test_rolling_features.py` proves that
+  later prices cannot change them.
+- **Baselines.** The prior-12-month town and flat type median price per sqm times floor area,
+  and a ridge regression with one-hot categoricals.
+- **LightGBM.** A random search over 30 parameter sets for the median (quantile 0.5) model,
+  scored by validation MAE, then p10 and p90 models with the same parameters.
+- **Interval calibration.** Raw quantile intervals cover only 54–73% of prices in the year
+  after training, missing above p90 in rising markets and below p10 in falling ones. A
+  yearly backtest predicts each year from 2019 to 2024 with models fit on the years before
+  it. Conformalized quantile regression then widens both bounds by the amount that brings
+  those out-of-sample prices to 80% (2.1% for model 2026-10). See `pipeline/train/calibrate.py`.
+- **Final models.** Refit on training plus validation with the tuned parameters, with the
+  widening baked into the p10 and p90 models.
+- **Export.** Each model is exported to ONNX (`model_p10/p50/p90.onnx`, float32 input
+  `input`, output log price) together with `features.json`. Split thresholds are first
+  rounded to float32, because the double thresholds LightGBM uses otherwise send some rows
+  down the other branch in ONNX. The export is checked against LightGBM (largest difference
+  1.7e-5 in log price).
+
+`make evaluate` (`pipeline/train/evaluate.py`) scores the test split and writes:
+
+- `models/<version>/metrics.json`
+- SHAP figures in `reports/figures/shap_*`
+- the model card, `models/<version>/model_card.md`
+
+It then runs the parity test: 200 test rows go through Python onnxruntime and
+onnxruntime-node (`tests/parity/`), and every relative difference must be below 1e-4. Only
+the model card is committed; models, metrics and parity cases are generated.
+
+To price one flat with the latest model:
+
+```bash
+uv run python -m pipeline.cli predict --block 122 --street "ANG MO KIO AVE 3" \
+    --flat-type "4 ROOM" --area 92 --storey 10
+```
+
+The CLI looks up the town, lease, flat model and block features from the database, computes
+the rolling medians for the month after the latest data, and prints p10, p50 and p90. The
+storey is mapped to the middle of its 3-storey range, as the data records it.
+`tests/test_predict_db.py` checks that the CLI rebuilds recorded sales' features exactly as
+in training.
+
 ## Data sources and licences
 
 Data from [data.gov.sg](https://data.gov.sg) is used under the
@@ -260,7 +316,19 @@ indicative only.
 
 ## Model results
 
-<!-- Phase 7: summary + link to model card -->
+Model 2026-10 on the test split (46,518 sales, 2025-01 to 2026-10). Full details are in the
+[model card](models/2026-10/model_card.md).
+
+| Model | MAE (S$) | MAPE | R² |
+|---|---|---|---|
+| LightGBM (median) | 29,176 | 4.43% | 0.960 |
+| Ridge baseline | 58,694 | 8.21% | 0.778 |
+| Town median baseline | 83,928 | 12.02% | 0.640 |
+
+The 80% interval (p10 to p90) contains 79.6% of test prices. On validation, LightGBM's MAE is
+S$27,579, against S$43,239 for ridge and S$73,732 for the town median. The test split was
+scored three times while the interval calibration was developed; the model card lists the
+earlier scores.
 
 ## Limitations
 
@@ -275,7 +343,12 @@ indicative only.
 - `txn_id` depends on row order in the source files. If HDB re-issues a file with rows inserted
   mid-file, IDs for later rows in that file change.
 
-<!-- Phase 7: model limitations -->
+- Estimates are indicative only, not valuations. The model knows nothing about a unit's
+  condition, renovation, facing or view, or its exact floor (only a 3-storey range).
+- Accuracy and interval coverage fall the further a sale is from the training data, because
+  the model cannot anticipate changes in market direction. Retrain as new months arrive.
+- The CLI prices only addresses with at least one recorded resale, and the current building
+  at that address.
 
 ## Licence
 

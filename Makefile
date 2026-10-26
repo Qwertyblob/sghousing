@@ -82,11 +82,13 @@ eda: ## Run the EDA notebooks; saves figures to reports/figures (notebook output
 	@out=$$(mktemp -d) && trap 'rm -rf "$$out"' EXIT && \
 		uv run jupyter nbconvert --to notebook --execute --output-dir "$$out" notebooks/*.ipynb
 
-train: ## Train baselines and LightGBM models (Phase 7)
-	$(call not_implemented,7)
+train: ## Train baselines and LightGBM quantile models; export ONNX to models/<version>
+	uv run python -m pipeline.train.train_lgbm
 
-evaluate: ## Evaluate models, write metrics and figures (Phase 7)
-	$(call not_implemented,7)
+evaluate: ## Test-set metrics, SHAP figures, model card, then the Node ONNX parity test
+	uv run python -m pipeline.train.evaluate
+	cd tests/parity && npm ci --no-audit --no-fund
+	uv run pytest -m parity
 
 export: ## Export site data and ONNX models (Phase 8)
 	$(call not_implemented,8)
@@ -112,5 +114,5 @@ all: ingest transform geocode features check train evaluate export ## Full pipel
 
 clean: ## Remove caches and build output (keeps data/ and the DB volume)
 	rm -rf .pytest_cache .ruff_cache site/dist
-	find . -path ./.venv -prune -o -path ./site/node_modules -prune -o \
+	find . -path ./.venv -prune -o -path ./site/node_modules -prune -o -path ./tests/parity/node_modules -prune -o \
 		-type d -name __pycache__ -exec rm -rf {} +
