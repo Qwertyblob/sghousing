@@ -140,7 +140,13 @@ def publish(staging: Path, final: Path) -> Path:
     shutil.rmtree(old, ignore_errors=True)
     if final.exists():
         final.rename(old)
-    staging.rename(final)
+    try:
+        staging.rename(final)
+    except BaseException:
+        # Put the active model back so models/LATEST still points at a complete model.
+        if old.exists() and not final.exists():
+            old.rename(final)
+        raise
     shutil.rmtree(old, ignore_errors=True)
     return final
 

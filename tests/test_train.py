@@ -205,6 +205,28 @@ def test_cli_rejects_bad_floor_area(area: str) -> None:
     assert exc.value.code == 2
 
 
+def test_publish_keeps_active_model_when_swap_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = tmp_path / "2026-10"
+    final.mkdir()
+    (final / "model_p50.txt").write_text("active", encoding="utf-8")
+    staging = tmp_path / ".2026-10.tmp"
+    staging.mkdir()
+    rename = Path.rename
+
+    def failing_rename(self: Path, target: Path) -> Path:
+        if self == staging:
+            raise OSError("disk full")
+        return rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing_rename)
+    with pytest.raises(OSError, match="disk full"):
+        publish(staging, final)
+    assert (final / "model_p50.txt").read_text(encoding="utf-8") == "active"
+    assert not (tmp_path / ".2026-10.old").exists()
+
+
 def test_publish_replaces_model_directory(tmp_path: Path) -> None:
     final = tmp_path / "2026-10"
     final.mkdir()
