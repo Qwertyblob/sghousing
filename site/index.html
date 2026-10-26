@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="Singapore HDB resale prices: trends by town, a map of planning areas, lease decay and an in-browser price estimate." />
+    <meta name="color-scheme" content="light dark" />
+    <title>HDB resale prices</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='2' y='4' width='5' height='10' fill='%232a78d6'/%3E%3Crect x='9' y='1' width='5' height='13' fill='%2352514e'/%3E%3C/svg%3E" />
+    <script>
+      // Apply a saved theme before first paint, so the page never flashes the other one.
+      try {
+        const theme = localStorage.getItem("theme");
+        if (theme === "light" || theme === "dark") document.documentElement.dataset.theme = theme;
+      } catch {}
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="header-inner">
+        <a class="brand" href="#/">HDB resale prices</a>
+        <nav aria-label="Main">
+          <ul class="nav-list">
+            <li><a href="#/" data-route="overview">Overview</a></li>
+            <li><a href="#/trends" data-route="trends">Trends</a></li>
+            <li><a href="#/map" data-route="map">Map</a></li>
+            <li><a href="#/lease" data-route="lease">Lease decay</a></li>
+            <li><a href="#/predict" data-route="predict">Predict</a></li>
+            <li><a href="#/about" data-route="about">About</a></li>
+          </ul>
+        </nav>
+        <button type="button" class="theme-toggle" id="theme-toggle">Dark theme</button>
+      </div>
+    </header>
+    <main id="main" tabindex="-1">
+      <p class="loading">Loading…</p>
+    </main>
+    <footer class="site-footer">
+      <p>
+        Data from <a href="https://data.gov.sg">data.gov.sg</a> under the
+        <a href="https://data.gov.sg/open-data-licence">Singapore Open Data Licence</a>.
+        Estimates are indicative only, not valuations.
+      </p>
+    </footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

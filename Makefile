@@ -12,7 +12,7 @@ PSQL := $(COMPOSE) exec -T -e PGOPTIONS='-c client_min_messages=warning' db \
 
 .PHONY: help setup db-up db-down db-shell db-reset db-check test test-db lint \
 	ingest transform geocode features check eda train evaluate export \
-	site-dev site-build publish snapshot restore-snapshot all clean
+	site-data site-deps site-dev site-build publish snapshot restore-snapshot all clean
 
 help: ## List all targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | \
@@ -94,11 +94,17 @@ export: ## Export site data and ONNX models to site/public/data, then validate t
 	uv run python -m pipeline.export.site_data
 	uv run pytest -m site_data
 
-site-dev: ## Serve the site locally (Phase 9)
-	$(call not_implemented,9)
+site-data: # The site reads the export; fail early with a hint when it is missing
+	@test -f site/public/data/meta.json || { echo "No site data: run 'make export' first" >&2; exit 1; }
 
-site-build: ## Build the static site into site/dist (Phase 9)
-	$(call not_implemented,9)
+site-deps:
+	cd site && npm ci --no-audit --no-fund
+
+site-dev: site-data site-deps ## Serve the site locally with live reload
+	cd site && npm run dev
+
+site-build: site-data site-deps ## Test, type-check and build the static site into site/dist
+	cd site && npm test && npm run build
 
 publish: ## Export, build and push site/dist to gh-pages (Phase 10)
 	$(call not_implemented,10)

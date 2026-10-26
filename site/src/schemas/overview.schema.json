@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "overview.json",
+  "description": "National monthly medians from 2000, and the latest 12 months against the 12 before by flat type ('ALL' first).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "from",
+    "to",
+    "national",
+    "by_flat_type"
+  ],
+  "properties": {
+    "from": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    },
+    "to": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}$"
+    },
+    "national": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "from",
+        "columns",
+        "rows"
+      ],
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}$"
+        },
+        "columns": {
+          "const": [
+            "month",
+            "sales",
+            "median_psm",
+            "median_price"
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string",
+                "pattern": "^[0-9]{4}-[0-9]{2}$"
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "minItems": 4,
+            "maxItems": 4
+          }
+        }
+      }
+    },
+    "by_flat_type": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "columns",
+        "rows"
+      ],
+      "properties": {
+        "columns": {
+          "const": [
+            "flat_type",
+            "sales_12m",
+            "median_price_12m",
+            "median_psm_12m",
+            "sales_prev_12m",
+            "median_price_prev_12m",
+            "median_psm_prev_12m"
+          ]
+        },
+        "rows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              },
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            ],
+            "minItems": 7,
+            "maxItems": 7
+          }
+        }
+      }
+    }
+  }
+}

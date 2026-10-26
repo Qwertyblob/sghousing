@@ -69,7 +69,9 @@ Run `make help` for the current list.
 | `eda` | Run the EDA notebooks and save their figures (outputs are not written back) |
 | `train` | Baselines, tuning, calibration and final LightGBM models; ONNX export to `models/<version>` |
 | `evaluate` | Test metrics, SHAP figures, model card, then the Node ONNX parity test |
-| `site-dev`, `site-build`, `publish` | Website (Phases 9–10) |
+| `site-dev` | Serve the site at http://localhost:5173/sghousing/ with live reload (needs `make export` first) |
+| `site-build` | Site unit tests, type check, and the static build in `site/dist` |
+| `publish` | Deploy to GitHub Pages (Phase 10) |
 | `snapshot`, `restore-snapshot` | Parquet snapshot of marts tables (Phase 10) |
 | `all` | Ingest through export, in order |
 | `clean` | Remove caches and build output (keeps data and DB) |
@@ -322,12 +324,13 @@ directory with `pytest -m site_data`.
 | File | Contents |
 |---|---|
 | `meta.json` | Coverage, last refresh, the month being priced, model version and test metrics, town file list, sources, licence, geocoder credit, disclaimer |
+| `overview.json` | The national monthly series and the latest 12 months against the 12 before, by flat type: 11 KB, so the landing page loads fast |
 | `town_month.json` | `marts.agg_town_month` from 2000: sales, median price per sqm and median price by town, flat type and month, with `ALL` rollups |
 | `planning_areas.geojson` | URA planning areas simplified with `ST_SimplifyPreserveTopology` (5 m): 12-month median price per sqm, the previous 12 months, year-on-year change (only where both windows have at least 20 sales), and a yearly trend from 2015 |
 | `lease_decay.json` | `marts.lease_decay_curve`: median price per sqm, and relative to its town, flat type and year, by whole years of remaining lease over the latest 5 years (bins with at least 30 sales) |
 | `blocks.json` | Every located block with a resale since 2015 and its model inputs for the month being priced: lease, building, distances and the 24-month block median. Also town-level 3/6/12-month medians and the usual flat model for each town and flat type |
 | `recent/{town}.json` | The last 24 months of sales in a town |
-| `model/` | `model_p10/p50/p90.onnx` and `features.json` of the latest model |
+| `model/` | `features.json` of the latest model and its `model_p10/p50/p90.onnx.gz`, gzipped (7.3 MB instead of 42 MB) because static hosts do not compress `.onnx` files; the site decompresses them in the browser |
 
 All files are minified JSON. Months are written as `"2026-10"` and timestamps as full ISO
 8601. Large tables are columnar, `{"columns": [...], "rows": [[...], ...]}`, rather than
@@ -343,9 +346,51 @@ self-intersect or collapse.
 (`as_of`). This is more accurate than recomputing it from the lease start year. For a later
 month, the site subtracts the months elapsed since `as_of`.
 
-The ONNX models account for most of the size (42 MB of 52 MB). The export removes
-the optional `nodes_hitrates` attribute from them, which saves 13%; predictions are
-unchanged and are checked on every export.
+The whole directory is 17 MB. The export removes the optional `nodes_hitrates` attribute
+from the ONNX models (13% smaller before gzip); predictions are unchanged and are checked on
+every export.
+
+## Website
+
+`site/` is a static site built with Vite and TypeScript (no framework). It reads everything
+from `data/`, has no backend, and is served from `/sghousing/` (set `SITE_BASE` to change
+it). Pages are switched with hash routes, and filters are kept in the URL, so a view can be
+bookmarked or shared (for example `#/trends?town=BEDOK&type=4 ROOM`).
+
+| Page | What it shows |
+|---|---|
+| Overview | Median price, price per sqm and resales over the latest 12 months against the 12 before, the national monthly trend since 2000, a table by flat type, and how fresh the data is |
+| Trends | Town and flat type pickers driving an Observable Plot line chart of the monthly median price per sqm (with All Singapore for reference) and a chart of monthly resales |
+| Map | A MapLibre choropleth of planning areas: median price per sqm (colour stops at quartiles) or its change on the year before. Hover for a tooltip; click an area, or choose it from the list, for a side panel with its yearly trend. There is no basemap, so no tile terms apply; the boundary dataset is credited on the map |
+| Lease decay | The price per sqm curve by remaining lease, for each flat type, either as S$ per sqm or relative to the town median |
+| Predict | Fuzzy search (Fuse.js) over `blocks.json`, then flat type, floor area and storey. The three ONNX models run in the browser with onnxruntime-web and give the median estimate with the p10 to p90 range. Below it: approximate factors and up to 10 recent sales at the same block or street |
+| About | Method, model accuracy, limitations, every data source with its licence, and a link to this repository |
+
+How the Predict page matches the CLI:
+
+- `site/src/predict/features.ts` builds the model input from `blocks.json` exactly as
+  `pipeline/train/predict.py` builds it from the database. `tests/test_site_features.py`
+  (`make test-db`) runs it in Node for 60 sampled blocks, flat types, areas and storeys and
+  requires the same float32 vector as the CLI. Shared estimate links
+  (`#/predict?block=...`) give the CLI's prices to the dollar.
+- Remaining lease is HDB's reported figure for the block, carried to the month being priced
+  by the export, then counted down by the months elapsed if today is later. This is more
+  precise than counting from the lease start year, which is all the spec asks for.
+- The models and the onnxruntime WebAssembly (about 11 MB together) download only when a
+  visitor starts using the form. They run in a worker, so the page never freezes while they
+  compile.
+- The factors are an approximation, not SHAP. Each is the change in the median estimate when
+  one group of inputs (floor area, storey, lease, MRT access, and so on) is set to that of a
+  typical flat of the same type in the same town.
+
+Accessibility and themes: every control works with the keyboard (the block search is an ARIA
+combobox, and the map has an area list). Every chart has a data table. Colours follow a
+validated colour-blind-safe palette, with separate light and dark steps. The theme follows
+the system setting and can be switched with the header button.
+
+Lighthouse 13.5 (default mobile profile, simulated slow 4G, run against `vite preview` of
+the production build) scores every page 95–100 for performance and 100 for accessibility.
+`npm test` in `site/` runs the feature builder's unit tests (Node's built-in test runner).
 
 ## Data sources and licences
 

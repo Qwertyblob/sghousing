@@ -6,13 +6,17 @@ for months, full ISO 8601 for timestamps). Large tables are columnar, {"columns"
 models. Every file has a JSON Schema in `site/src/schemas/` (settings.site_schema_dir).
 
 - meta.json: coverage, last refresh, model, towns, sources and licence
+- overview.json: the national monthly series and the latest 12 months against the 12 before,
+  by flat type; small, as the landing page loads it first
 - town_month.json: marts.agg_town_month from TOWN_MONTH_FROM, with 'ALL' rollups
 - planning_areas.geojson: simplified boundaries, marts.agg_planning_area and a yearly trend
 - lease_decay.json: marts.lease_decay_curve (bins with at least MIN_CURVE_SALES sales)
 - blocks.json: every located block with a resale since TRAIN_FROM, with its model inputs as
   of the month after the latest data, plus town-level rolling medians and flat models
 - recent/{town-slug}.json: the last RECENT_MONTHS months of sales in each town
-- model/: model_p10/p50/p90.onnx and features.json of the latest model
+- model/: features.json of the latest model and its model_p10/p50/p90.onnx gzipped
+  (`.onnx.gz`, about a fifth of the size; static hosts need not compress them, and the site
+  decompresses them in the browser)
 
 The directory is built next to the old one, validated (`validation_errors`: schemas, cross
 references, sizes) and only then swapped in, so a failed or invalid export leaves the previous
@@ -21,6 +25,7 @@ files in place, and files for vanished towns never linger.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import re
@@ -65,6 +70,7 @@ DISCLAIMER = "Indicative only: statistical estimates from past resales, not valu
 # Schema (site_schema_dir/{name}.schema.json) of every fixed file; recent/*.json use "recent".
 SCHEMA_NAMES = {
     "meta.json": "meta",
+    "overview.json": "overview",
     "town_month.json": "town_month",
     "planning_areas.geojson": "planning_areas",
     "lease_decay.json": "lease_decay",
@@ -136,6 +142,52 @@ def town_month(conn: Connection) -> dict[str, Any]:
                ORDER BY town, flat_type, month""",
             start=TOWN_MONTH_FROM,
         ),
+    }
+
+
+def overview(conn: Connection, end: date) -> dict[str, Any]:
+    """National monthly medians, and the latest 12 months (to `end`) against the 12 before,
+    for all flats and by flat type."""
+    national = table(
+        conn,
+        """SELECT to_char(month, 'YYYY-MM') AS month, sales, median_psm, median_price
+           FROM marts.agg_town_month
+           WHERE town = 'ALL' AND flat_type = 'ALL' AND month >= :start
+           ORDER BY month""",
+        start=TOWN_MONTH_FROM,
+    )
+    windows = table(
+        conn,
+        """WITH sales AS (
+               SELECT flat_type, resale_price, price_psm,
+                      month > :end - interval '12 months' AS latest
+               FROM staging.hdb_resale
+               WHERE month > :end - interval '24 months' AND month <= :end
+           )
+           SELECT coalesce(flat_type, 'ALL') AS flat_type,
+                  count(*) FILTER (WHERE latest)::integer AS sales_12m,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY resale_price)
+                      FILTER (WHERE latest)::numeric) AS median_price_12m,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                      FILTER (WHERE latest)::numeric, 2) AS median_psm_12m,
+                  count(*) FILTER (WHERE NOT latest)::integer AS sales_prev_12m,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY resale_price)
+                      FILTER (WHERE NOT latest)::numeric) AS median_price_prev_12m,
+                  round(percentile_cont(0.5) WITHIN GROUP (ORDER BY price_psm)
+                      FILTER (WHERE NOT latest)::numeric, 2) AS median_psm_prev_12m
+           FROM sales
+           GROUP BY GROUPING SETS ((flat_type), ())
+           ORDER BY GROUPING(flat_type) DESC, 1""",
+        end=end,
+    )
+    first = conn.execute(
+        text("SELECT to_char(:end - interval '11 months', 'YYYY-MM')"), {"end": end}
+    ).scalar_one()
+    return {
+        "from": first,
+        "to": f"{end:%Y-%m}",
+        "national": {"from": f"{TOWN_MONTH_FROM:%Y-%m}", **national},
+        "by_flat_type": windows,
     }
 
 
@@ -462,9 +514,9 @@ def validation_errors(directory: Path, schema_dir: Path) -> list[str]:
     if meta["model"]["version"] != spec["model_version"]:
         errors.append("meta.json: model version differs from model/features.json")
     for file in spec["outputs"].values():
-        model = directory / "model" / file
+        model = directory / "model" / f"{file}.gz"
         if not model.exists() or model.stat().st_size == 0:
-            errors.append(f"model/{file}: missing or empty")
+            errors.append(f"model/{file}.gz: missing or empty")
     geojson = (directory / "planning_areas.geojson").stat().st_size
     if geojson >= MAX_GEOJSON_BYTES:
         errors.append(f"planning_areas.geojson: {geojson:,} bytes, over {MAX_GEOJSON_BYTES:,}")
@@ -482,6 +534,7 @@ def build(directory: Path, settings: Settings) -> None:
         with engine.connect() as conn:
             end = last_month(conn)
             as_of = next_month(end)
+            write_json(directory / "overview.json", overview(conn, end))
             write_json(directory / "town_month.json", town_month(conn))
             write_json(directory / "lease_decay.json", lease_decay(conn))
             write_json(directory / "planning_areas.geojson", planning_areas(conn))
@@ -496,8 +549,11 @@ def build(directory: Path, settings: Settings) -> None:
         engine.dispose()
     spec = json.loads((model_dir / "features.json").read_text(encoding="utf-8"))
     (directory / "model").mkdir()
-    for file in (*spec["outputs"].values(), "features.json"):
-        shutil.copyfile(model_dir / file, directory / "model" / file)
+    shutil.copyfile(model_dir / "features.json", directory / "model" / "features.json")
+    for file in spec["outputs"].values():
+        # mtime=0 keeps the archive byte-identical across exports.
+        packed = gzip.compress((model_dir / file).read_bytes(), compresslevel=9, mtime=0)
+        (directory / "model" / f"{file}.gz").write_bytes(packed)
 
 
 def run(settings: Settings) -> Path:
