@@ -67,6 +67,9 @@ LICENCE = {
 }
 GEOCODER = {"name": "OneMap search API", "url": "https://www.onemap.gov.sg/apidocs/"}
 DISCLAIMER = "Indicative only: statistical estimates from past resales, not valuations."
+# Dataset credits of a restored data snapshot (pipeline.snapshot), kept apart from
+# raw.ingestion_log, which records only what this machine ingested.
+RESTORED_SOURCES = "staging.restored_sources"
 # Schema (site_schema_dir/{name}.schema.json) of every fixed file; recent/*.json use "recent".
 SCHEMA_NAMES = {
     "meta.json": "meta",
@@ -413,19 +416,29 @@ def recent_sales(conn: Connection, end: date) -> dict[str, dict[str, Any]]:
     return by_town
 
 
-def _snapshot_credits(snapshot_dir: Path) -> dict[tuple[str, str], dict[str, Any]]:
-    """Dataset names and dates from a restored data snapshot's manifest, by (source, id)."""
-    manifest = snapshot_dir / "manifest.json"
-    if not manifest.exists():
-        return {}
-    credits = json.loads(manifest.read_text(encoding="utf-8")).get("sources", [])
-    return {(c["source"], c["dataset_id"]): c for c in credits}
+def _credit(
+    source: str, dataset_id: str, name: str, last_updated: Any, retrieved: Any
+) -> dict[str, Any]:
+    return {
+        "source": source,
+        "dataset_id": dataset_id,
+        "name": name,
+        "url": f"https://data.gov.sg/datasets/{dataset_id}/view",
+        "last_updated": last_updated,
+        "retrieved": retrieved,
+    }
 
 
 def sources(conn: Connection, settings: Settings) -> list[dict[str, Any]]:
-    """Every loaded dataset, named from its downloaded snapshot's metadata, or from a restored
-    data snapshot's manifest when the raw download is not on this machine."""
-    restored = _snapshot_credits(settings.snapshot_dir)
+    """The datasets behind the staging data: a restored data snapshot's credits while its
+    tables are in use (RESTORED_SOURCES, which `make transform` drops), otherwise every
+    dataset in raw.ingestion_log, named from its downloaded snapshot's metadata."""
+    if conn.execute(text("SELECT to_regclass(:t)"), {"t": RESTORED_SOURCES}).scalar_one():
+        rows = conn.execute(
+            text(f"""SELECT source, dataset_id, name, last_updated, retrieved
+                     FROM {RESTORED_SOURCES} ORDER BY source, dataset_id""")
+        )
+        return [_credit(*row) for row in rows]
     out = []
     for source, dataset_id, downloaded_at in conn.execute(
         text("""SELECT source, dataset_id, max(downloaded_at)
@@ -435,21 +448,11 @@ def sources(conn: Connection, settings: Settings) -> list[dict[str, Any]]:
             settings.data_dir / "raw" / source / dataset_id, verify_checksum=False
         )
         metadata = current[0].metadata if current else None
-        credit = restored.get((source, dataset_id), {})
         if metadata and metadata.name:
             name, last_updated = metadata.name, metadata.last_updated_at
         else:
-            name, last_updated = credit.get("name", dataset_id), credit.get("last_updated")
-        out.append(
-            {
-                "source": source,
-                "dataset_id": dataset_id,
-                "name": name,
-                "url": f"https://data.gov.sg/datasets/{dataset_id}/view",
-                "last_updated": last_updated,
-                "retrieved": downloaded_at,
-            }
-        )
+            name, last_updated = dataset_id, None
+        out.append(_credit(source, dataset_id, name, last_updated, downloaded_at))
     return out
 
 
@@ -459,7 +462,8 @@ def meta(
     first, last, count = conn.execute(
         text("SELECT min(month), max(month), count(*) FROM staging.hdb_resale")
     ).one()
-    refreshed = conn.execute(text("SELECT max(downloaded_at) FROM raw.ingestion_log")).scalar_one()
+    credits = sources(conn, settings)
+    refreshed = max((c["retrieved"] for c in credits), default=None)
     spec = json.loads((model_dir / "features.json").read_text(encoding="utf-8"))
     model: dict[str, Any] = {
         "version": spec["model_version"],
@@ -483,7 +487,7 @@ def meta(
         "priced_for": f"{as_of:%Y-%m}",
         "model": model,
         "towns": [{"town": t, "file": f"recent/{town_slug(t)}.json"} for t in towns],
-        "sources": sources(conn, settings),
+        "sources": credits,
         "licence": LICENCE,
         "geocoder": GEOCODER,
         "disclaimer": DISCLAIMER,

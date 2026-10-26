@@ -4,6 +4,10 @@
 -- not publish unit numbers. txn_id is derived from the source dataset and row number.
 -- Required columns carry NOT NULL / CHECK constraints so bad data fails the build.
 
+-- Staging is rebuilt from this machine's raw downloads, so a restored data snapshot's
+-- dataset credits no longer describe it; the export credits raw.ingestion_log instead.
+DROP TABLE IF EXISTS staging.restored_sources;
+
 DROP TABLE IF EXISTS staging.hdb_resale;
 
 CREATE TABLE staging.hdb_resale AS

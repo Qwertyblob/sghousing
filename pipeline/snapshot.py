@@ -4,18 +4,20 @@
 A snapshot lets someone rebuild the site without ingesting or geocoding: `make
 restore-snapshot && make export && make site-build`. It holds, in settings.snapshot_dir:
 
-- `{schema}.{table}.parquet` for every `marts` table, and for the three other tables the
-  site export reads (SNAPSHOT_EXTRA_TABLES), with typed columns: numeric as exact decimals,
+- `{schema}.{table}.parquet` for every `marts` table, and for the two other tables the site
+  export reads (SNAPSHOT_EXTRA_TABLES), with typed columns: numeric as exact decimals,
   geometry as EWKB
 - `model-{version}.tar.gz`: the latest model directory (ONNX, LightGBM text models, metrics
   and model card), so the export can run without training
-- `manifest.json`: every table's column types, indexes, row count and SHA-256, the model's
-  checksum, and the source datasets' names and dates (meta.json credits them, and their raw
-  downloads are not part of a snapshot)
+- `manifest.json`: every table's columns (type, NOT NULL, default), indexes, keys and CHECK
+  constraints, row count and SHA-256, the model's checksum, and the source datasets' names
+  and dates (meta.json credits them, and their raw downloads are not part of a snapshot)
 
-Restoring checks every checksum, recreates each table with its original types and indexes,
-loads it, and makes the snapshot's model the latest one. Both steps are idempotent: the
-same database gives byte-identical files, and restoring twice gives the same database.
+Restoring checks every checksum and unpacks the model before changing anything. Then, in one
+transaction, it recreates each table with its types, constraints and indexes, loads it,
+records the snapshot's dataset credits in RESTORED_SOURCES, and, as the last step before
+committing, makes the snapshot's model the latest one. Both steps are idempotent: the same
+database gives byte-identical files, and restoring twice gives the same database.
 """
 
 from __future__ import annotations
@@ -44,19 +46,20 @@ from sqlalchemy import Connection, text
 from config.settings import Settings, get_settings
 from pipeline.common.db import get_engine
 from pipeline.common.log import setup_logging
-from pipeline.export.site_data import sources
-from pipeline.ingest.load import ensure_log_table
-from pipeline.train.train_lgbm import LATEST_FILE, latest_model_dir, publish
+from pipeline.export.site_data import RESTORED_SOURCES, sources
+from pipeline.train.train_lgbm import LATEST_FILE, QUANTILES, latest_model_dir, publish
 
 logger = logging.getLogger(__name__)
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
 MANIFEST = "manifest.json"
-# Tables outside `marts` that pipeline.export.site_data reads.
-SNAPSHOT_EXTRA_TABLES = ("staging.hdb_resale", "staging.planning_areas", "raw.ingestion_log")
-# raw.ingestion_log is recreated by the ingest code (its id sequence and index), not from
-# the manifest, so a later `make ingest` keeps appending to it.
-LOG_TABLE = "raw.ingestion_log"
+# Tables outside `marts` that pipeline.export.site_data reads. Its third input,
+# raw.ingestion_log, records what this machine ingested and stays out of snapshots: a
+# restore loads no raw tables, so `make ingest` must not see the snapshot's datasets as
+# loaded. The snapshot's dataset credits go to RESTORED_SOURCES instead.
+SNAPSHOT_EXTRA_TABLES = ("staging.hdb_resale", "staging.planning_areas")
+# What the export needs from a model directory.
+MODEL_FILES = ("features.json", *(f"model_{name}.onnx" for name in QUANTILES))
 BATCH_ROWS = 50_000
 # Exact decimals for unconstrained numeric columns, at the largest scale in the column.
 DECIMAL_PRECISION = 38
@@ -115,18 +118,28 @@ def snapshot_tables(conn: Connection) -> list[str]:
 
 
 def table_columns(conn: Connection, table: str) -> list[dict[str, Any]]:
-    """Name, type and (numeric) largest scale of each column, in table order."""
+    """Name, type, NOT NULL, default and (numeric) largest scale of each column, in table
+    order."""
     rows = conn.execute(
-        text("""SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+        text("""SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+                       pg_get_expr(d.adbin, d.adrelid), a.attgenerated <> '' OR a.attidentity <> ''
                 FROM pg_attribute AS a
+                LEFT JOIN pg_attrdef AS d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
                 WHERE a.attrelid = CAST(:table AS regclass) AND a.attnum > 0
                   AND NOT a.attisdropped
                 ORDER BY a.attnum"""),
         {"table": table},
     ).all()
     columns = []
-    for name, pg_type in rows:
-        column: dict[str, Any] = {"name": name, "type": pg_type}
+    for name, pg_type, not_null, default, generated in rows:
+        if generated:
+            raise SnapshotError(f"{table}.{name}: generated and identity columns are not supported")
+        column: dict[str, Any] = {
+            "name": name,
+            "type": pg_type,
+            "not_null": not_null,
+            "default": default,
+        }
         if pg_type == "numeric":
             column["scale"] = conn.execute(
                 text(f"SELECT coalesce(max(scale({_ident(name)})), 0) FROM {_table_sql(table)}")
@@ -169,6 +182,21 @@ def table_indexes(conn: Connection, table: str) -> list[dict[str, Any]]:
     ]
 
 
+def table_checks(conn: Connection, table: str) -> list[dict[str, str]]:
+    """CHECK constraint definitions. Raise on any other constraint (other than keys and NOT
+    NULL, which the indexes and columns carry), since a restore would silently drop it."""
+    rows = conn.execute(
+        text("""SELECT conname, contype, pg_get_constraintdef(oid) FROM pg_constraint
+                WHERE conrelid = CAST(:table AS regclass) AND contype NOT IN ('p', 'u', 'n')
+                ORDER BY conname"""),
+        {"table": table},
+    ).all()
+    unsupported = [name for name, kind, _ in rows if kind != "c"]
+    if unsupported:
+        raise SnapshotError(f"{table}: constraints {unsupported} cannot be snapshotted")
+    return [{"name": name, "definition": definition} for name, _, definition in rows]
+
+
 def _order_by(conn: Connection, table: str, columns: list[dict[str, Any]]) -> str:
     """The primary key, or every non-geometry column: a stable row order makes the Parquet
     file byte-identical for the same data."""
@@ -199,7 +227,8 @@ def export_table(conn: Connection, table: str, path: Path) -> dict[str, Any]:
     query = f"SELECT {select} FROM {_table_sql(table)} ORDER BY {_order_by(conn, table, columns)}"
     rows = 0
     with pq.ParquetWriter(path, schema, compression="zstd") as writer:
-        result = conn.execution_options(yield_per=BATCH_ROWS).execute(text(query))
+        # On the statement: Connection.execution_options would stream every later query too.
+        result = conn.execute(text(query).execution_options(yield_per=BATCH_ROWS))
         for batch in result.partitions():
             values = list(zip(*batch, strict=True)) if batch else [[] for _ in columns]
             arrays = [
@@ -215,6 +244,7 @@ def export_table(conn: Connection, table: str, path: Path) -> dict[str, Any]:
         "sha256": sha256(path),
         "columns": columns,
         "indexes": table_indexes(conn, table),
+        "checks": table_checks(conn, table),
     }
 
 
@@ -337,70 +367,110 @@ def _rows(path: Path, columns: list[dict[str, Any]]) -> Iterator[tuple[Any, ...]
             )
 
 
+def _column_sql(column: dict[str, Any]) -> sql.Composable:
+    parts = [sql.Identifier(column["name"]), sql.SQL(column["type"])]
+    if column["default"] is not None:
+        parts.append(sql.SQL("DEFAULT " + column["default"]))
+    if column["not_null"]:
+        parts.append(sql.SQL("NOT NULL"))
+    return sql.SQL(" ").join(parts)
+
+
 def restore_table(cur: psycopg.Cursor, directory: Path, entry: dict[str, Any]) -> None:
     """Recreate one table from its manifest entry and load its Parquet file."""
-    table = entry["table"]
-    schema, name = _split(table)
-    target = sql.Identifier(schema, name)
+    target = sql.Identifier(*_split(entry["table"]))
     cur.execute(sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(target))
-    if table == LOG_TABLE:
-        ensure_log_table(cur, schema)
-    else:
-        cur.execute(
-            sql.SQL("CREATE TABLE {} ({})").format(
-                target,
-                sql.SQL(", ").join(
-                    sql.SQL("{} {}").format(sql.Identifier(c["name"]), sql.SQL(c["type"]))
-                    for c in entry["columns"]
-                ),
-            )
+    cur.execute(
+        sql.SQL("CREATE TABLE {} ({})").format(
+            target, sql.SQL(", ").join(_column_sql(c) for c in entry["columns"])
         )
+    )
     names = sql.SQL(", ").join(sql.Identifier(c["name"]) for c in entry["columns"])
     with cur.copy(sql.SQL("COPY {} ({}) FROM STDIN").format(target, names)) as copy:
         for row in _rows(directory / entry["file"], entry["columns"]):
             copy.write_row(row)
-    if table == LOG_TABLE:
-        cur.execute(
-            "SELECT setval(pg_get_serial_sequence('raw.ingestion_log', 'id'), "
-            "coalesce(max(id), 0) + 1, false) FROM raw.ingestion_log"
-        )
-    else:
-        for index in entry["indexes"]:
-            cur.execute(index["definition"])
-            if index["constraint"]:
-                cur.execute(
-                    sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} {} USING INDEX {}").format(
-                        target,
-                        sql.Identifier(index["constraint"]["name"]),
-                        sql.SQL(index["constraint"]["type"]),
-                        sql.Identifier(index["name"]),
-                    )
+    for index in entry["indexes"]:
+        cur.execute(index["definition"])
+        if index["constraint"]:
+            cur.execute(
+                sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} {} USING INDEX {}").format(
+                    target,
+                    sql.Identifier(index["constraint"]["name"]),
+                    sql.SQL(index["constraint"]["type"]),
+                    sql.Identifier(index["name"]),
                 )
+            )
+    for check in entry["checks"]:  # added after the load, so the rows are checked once
+        cur.execute(
+            sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} {}").format(
+                target, sql.Identifier(check["name"]), sql.SQL(check["definition"])
+            )
+        )
     cur.execute(sql.SQL("ANALYZE {}").format(target))
 
 
-def restore_model(settings: Settings, directory: Path, model: dict[str, Any]) -> Path:
-    """Unpack the snapshot's model into settings.models_dir and make it the latest."""
-    settings.models_dir.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=".restore.", dir=settings.models_dir))
-    try:
-        with tarfile.open(directory / model["file"], mode="r:gz") as tar:
-            tar.extractall(staging, filter="data")
-        final = publish(staging / model["version"], settings.models_dir / model["version"])
-    finally:
-        shutil.rmtree(staging, ignore_errors=True)
-    (settings.models_dir / LATEST_FILE).write_text(model["version"] + "\n", encoding="utf-8")
+def restore_sources(cur: psycopg.Cursor, credits: list[dict[str, Any]]) -> None:
+    """Replace RESTORED_SOURCES with the snapshot's dataset credits."""
+    target = sql.Identifier(*_split(RESTORED_SOURCES))
+    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(target))
+    # last_updated stays the text data.gov.sg published (ISO 8601 with its UTC offset), so
+    # the export credits it exactly as an export from the raw downloads would.
+    cur.execute(
+        sql.SQL("""CREATE TABLE {} (
+                       source text NOT NULL,
+                       dataset_id text NOT NULL,
+                       name text NOT NULL,
+                       last_updated text,
+                       retrieved timestamptz NOT NULL,
+                       PRIMARY KEY (source, dataset_id)
+                   )""").format(target)
+    )
+    cur.executemany(
+        sql.SQL("INSERT INTO {} VALUES (%s, %s, %s, %s, %s)").format(target),
+        [
+            (c["source"], c["dataset_id"], c["name"], c["last_updated"], c["retrieved"])
+            for c in credits
+        ],
+    )
+
+
+def unpack_model(directory: Path, model: dict[str, Any], into: Path) -> Path:
+    """Extract the snapshot's model archive into `into`; return the model directory."""
+    with tarfile.open(directory / model["file"], mode="r:gz") as tar:
+        tar.extractall(into, filter="data")
+    unpacked = into / model["version"]
+    missing = [name for name in MODEL_FILES if not (unpacked / name).is_file()]
+    if missing:
+        raise SnapshotError(f"{model['file']}: no {', '.join(missing)} in {model['version']}/")
+    return unpacked
+
+
+def install_model(settings: Settings, unpacked: Path, version: str) -> Path:
+    """Move an unpacked model into settings.models_dir and make it the latest."""
+    final = publish(unpacked, settings.models_dir / version)
+    (settings.models_dir / LATEST_FILE).write_text(version + "\n", encoding="utf-8")
     return final
 
 
 def restore(settings: Settings) -> dict[str, Any]:
-    """Load the snapshot in settings.snapshot_dir into the database (one transaction) and
-    restore its model."""
+    """Load the snapshot in settings.snapshot_dir into the database and make its model the
+    latest.
+
+    Nothing changes unless every checksum matches and the model unpacks. The tables load in
+    one transaction whose last step installs the model, so any failure leaves the database
+    as it was; if the commit itself fails, models/LATEST is pointed back.
+    """
     directory = settings.snapshot_dir
     manifest = read_manifest(directory)
     verify(directory, manifest)
+    settings.models_dir.mkdir(parents=True, exist_ok=True)
+    scratch = Path(tempfile.mkdtemp(prefix=".restore.", dir=settings.models_dir))
+    latest = settings.models_dir / LATEST_FILE
+    previous = latest.read_text(encoding="utf-8") if latest.exists() else None
+    installed = False
     engine = get_engine()
     try:
+        unpacked = unpack_model(directory, manifest["model"], scratch)
         with engine.begin() as conn:
             raw = conn.connection.driver_connection
             assert isinstance(raw, psycopg.Connection)
@@ -408,9 +478,19 @@ def restore(settings: Settings) -> dict[str, Any]:
                 for entry in manifest["tables"]:
                     restore_table(cur, directory, entry)
                     logger.info("%s: %s rows", entry["table"], f"{entry['rows']:,}")
+                restore_sources(cur, manifest["sources"])
+            model = install_model(settings, unpacked, manifest["model"]["version"])
+            installed = True
+    except BaseException:
+        if installed:
+            if previous is None:
+                latest.unlink(missing_ok=True)
+            else:
+                latest.write_text(previous, encoding="utf-8")
+        raise
     finally:
         engine.dispose()
-    model = restore_model(settings, directory, manifest["model"])
+        shutil.rmtree(scratch, ignore_errors=True)
     logger.info("Model %s restored to %s", manifest["model"]["version"], model)
     return manifest
 

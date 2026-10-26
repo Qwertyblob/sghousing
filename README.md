@@ -449,22 +449,31 @@ the production build) scores every page 95–100 for performance and 100 for acc
 
 `make snapshot` writes `data/snapshot/` (about 150 MB, zstd Parquet):
 
-- every `marts` table, plus `staging.hdb_resale`, `staging.planning_areas` and
-  `raw.ingestion_log`. `make export` reads these three as well (recent sales, map
-  boundaries and source credits), so a snapshot of the marts alone could not rebuild the site.
+- every `marts` table, plus `staging.hdb_resale` and `staging.planning_areas`. `make export`
+  reads these two as well (recent sales and map boundaries), so a snapshot of the marts alone
+  could not rebuild the site.
 - the trained model as `model-<version>.tar.gz` (ONNX files, metrics and model card), so the
   snapshot route skips training.
-- `manifest.json`: each table's columns and types, indexes and constraints, row count and
-  SHA-256, the model's SHA-256, the data's last month and the source credits.
+- `manifest.json`: each table's columns (type, NOT NULL, default), keys, indexes and CHECK
+  constraints, row count and SHA-256, the model's SHA-256, the data's last month and the
+  source credits. A table with a constraint the restore could not recreate (such as a
+  foreign key) stops the snapshot rather than being restored without it.
 
 Column types are kept exactly (numerics as decimals, geometries as EWKB), and rows are
 written in a fixed order, so rerunning `make snapshot` on the same database gives
 byte-identical files. The command prints the `gh release create` command that publishes the
 snapshot as a release; it does not run it.
 
-`make restore-snapshot` verifies every checksum first and changes nothing if one fails. It
-then recreates each table with its indexes and constraints, loads the rows and installs the
-model as `models/LATEST`. Running it twice gives the same database.
+`make restore-snapshot` verifies every checksum and unpacks the model before changing
+anything. Then, in one transaction, it recreates each table with its constraints and
+indexes, loads the rows, records the snapshot's source credits in `staging.restored_sources`
+and, as the last step, installs the model as `models/LATEST`. A failure at any step leaves
+the database and the model in use as they were. Running it twice gives the same database.
+
+A restore leaves `raw.ingestion_log` alone: it records what this machine has ingested, and
+the snapshot loads no raw tables, so a later `make ingest` loads every dataset. The export
+credits the snapshot's sources until `make transform` rebuilds staging from this machine's
+downloads (it drops `staging.restored_sources`); from then on it credits the ingestion log.
 
 ## Publishing
 
