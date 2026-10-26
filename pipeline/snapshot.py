@@ -32,6 +32,7 @@ import sys
 import tarfile
 import tempfile
 from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -47,7 +48,13 @@ from config.settings import Settings, get_settings
 from pipeline.common.db import get_engine
 from pipeline.common.log import setup_logging
 from pipeline.export.site_data import RESTORED_SOURCES, sources
-from pipeline.train.train_lgbm import LATEST_FILE, QUANTILES, latest_model_dir, publish
+from pipeline.train.train_lgbm import (
+    LATEST_FILE,
+    QUANTILES,
+    latest_model_dir,
+    publish,
+    write_latest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -445,11 +452,50 @@ def unpack_model(directory: Path, model: dict[str, Any], into: Path) -> Path:
     return unpacked
 
 
-def install_model(settings: Settings, unpacked: Path, version: str) -> Path:
-    """Move an unpacked model into settings.models_dir and make it the latest."""
-    final = publish(unpacked, settings.models_dir / version)
-    (settings.models_dir / LATEST_FILE).write_text(version + "\n", encoding="utf-8")
-    return final
+def _replaced(final: Path) -> Path:
+    """Where installing_model keeps the directory it replaces until the install is final."""
+    return final.with_name(f".{final.name}.replaced")
+
+
+def recover_install(settings: Settings, version: str) -> None:
+    """Undo what an interrupted installing_model left: a model directory moved aside but
+    not put back. The directory is only ever missing between installing_model's renames."""
+    final = settings.models_dir / version
+    replaced = _replaced(final)
+    if replaced.exists():
+        if final.exists():
+            shutil.rmtree(replaced)
+        else:
+            replaced.rename(final)
+            logger.warning("Put back %s from an interrupted restore", final)
+
+
+@contextmanager
+def installing_model(settings: Settings, unpacked: Path, version: str) -> Iterator[Path]:
+    """Install an unpacked model and make it the latest for the duration of the block; if
+    anything fails, here or in the block, put back the directory it replaced and the
+    previous models/LATEST."""
+    final = settings.models_dir / version
+    replaced = _replaced(final)
+    latest = settings.models_dir / LATEST_FILE
+    previous = latest.read_text(encoding="utf-8").strip() if latest.exists() else None
+    moved_aside = moved_in = False
+    try:
+        if final.exists():
+            final.rename(replaced)
+            moved_aside = True
+        unpacked.rename(final)
+        moved_in = True
+        write_latest(settings.models_dir, version)
+        yield final
+    except BaseException:
+        if moved_in:
+            shutil.rmtree(final)
+        if moved_aside:
+            replaced.rename(final)
+        write_latest(settings.models_dir, previous)
+        raise
+    shutil.rmtree(replaced, ignore_errors=True)
 
 
 def restore(settings: Settings) -> dict[str, Any]:
@@ -457,21 +503,23 @@ def restore(settings: Settings) -> dict[str, Any]:
     latest.
 
     Nothing changes unless every checksum matches and the model unpacks. The tables load in
-    one transaction whose last step installs the model, so any failure leaves the database
-    as it was; if the commit itself fails, models/LATEST is pointed back.
+    one transaction whose last step installs the model, and the install is undone (the
+    replaced model directory and models/LATEST put back) unless the commit succeeds, so a
+    failure at any step leaves the database and the models as they were.
     """
     directory = settings.snapshot_dir
     manifest = read_manifest(directory)
     verify(directory, manifest)
+    version = manifest["model"]["version"]
     settings.models_dir.mkdir(parents=True, exist_ok=True)
+    recover_install(settings, version)
     scratch = Path(tempfile.mkdtemp(prefix=".restore.", dir=settings.models_dir))
-    latest = settings.models_dir / LATEST_FILE
-    previous = latest.read_text(encoding="utf-8") if latest.exists() else None
-    installed = False
     engine = get_engine()
     try:
         unpacked = unpack_model(directory, manifest["model"], scratch)
-        with engine.begin() as conn:
+        # Contexts exit in reverse: engine.begin() commits first, then the stack finishes
+        # the install, or undoes it if the commit (or anything before it) failed.
+        with ExitStack() as install, engine.begin() as conn:
             raw = conn.connection.driver_connection
             assert isinstance(raw, psycopg.Connection)
             with raw.cursor() as cur:
@@ -479,15 +527,7 @@ def restore(settings: Settings) -> dict[str, Any]:
                     restore_table(cur, directory, entry)
                     logger.info("%s: %s rows", entry["table"], f"{entry['rows']:,}")
                 restore_sources(cur, manifest["sources"])
-            model = install_model(settings, unpacked, manifest["model"]["version"])
-            installed = True
-    except BaseException:
-        if installed:
-            if previous is None:
-                latest.unlink(missing_ok=True)
-            else:
-                latest.write_text(previous, encoding="utf-8")
-        raise
+            model = install.enter_context(installing_model(settings, unpacked, version))
     finally:
         engine.dispose()
         shutil.rmtree(scratch, ignore_errors=True)

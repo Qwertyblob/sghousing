@@ -33,13 +33,14 @@ from pipeline.snapshot import (
     export_table,
     pack_model,
     read_manifest,
+    recover_install,
     restore,
     restore_table,
     sha256,
     unpack_model,
     verify,
 )
-from pipeline.train.train_lgbm import LATEST_FILE
+from pipeline.train.train_lgbm import LATEST_FILE, write_latest
 
 SCRATCH = "snapshot_test"
 SAMPLE = f"{SCRATCH}.sample"
@@ -186,8 +187,9 @@ def test_export_rejects_constraints_it_cannot_restore(engine: Engine, tmp_path: 
 
 @pytest.fixture
 def restoring(engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Settings:
-    """A snapshot of SAMPLE (values 'a', 'b') and a stub model; SAMPLE then holds 'changed',
-    the model in use is 2026-09, and restored credits go to the scratch schema."""
+    """A snapshot of SAMPLE (values 'a', 'b') and a stub 2026-10 model; SAMPLE then holds
+    'changed', the model in use is 2026-09, an older 2026-10 model exists, and restored
+    credits go to the scratch schema."""
     directory = tmp_path / "snapshot"
     directory.mkdir()
     with engine.begin() as conn:
@@ -207,7 +209,8 @@ def restoring(engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     }
     (directory / MANIFEST).write_text(json.dumps(manifest))
     models = tmp_path / "models"
-    models.mkdir()
+    (models / "2026-10").mkdir(parents=True)  # an earlier 2026-10 model a restore replaces
+    (models / "2026-10" / "old.onnx").write_text("old")
     (models / LATEST_FILE).write_text("2026-09\n")
     for module in (snapshot, site_data):
         monkeypatch.setattr(module, "RESTORED_SOURCES", f"{SCRATCH}.restored_sources")
@@ -216,6 +219,19 @@ def restoring(engine: Engine, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def _values(conn: Connection) -> list[str]:
     return list(conn.execute(text(f"SELECT v FROM {SAMPLE} ORDER BY id")).scalars())
+
+
+def _models(settings: Settings) -> tuple[str, list[str], list[str]]:
+    """models/LATEST, everything in models/ (leftovers included), and the 2026-10 files."""
+    models = settings.models_dir
+    return (
+        (models / LATEST_FILE).read_text(),
+        sorted(p.name for p in models.iterdir()),
+        sorted(p.name for p in (models / "2026-10").iterdir()),
+    )
+
+
+UNCHANGED_MODELS = ("2026-09\n", ["2026-10", LATEST_FILE], ["old.onnx"])
 
 
 def _ingestion_log(conn: Connection) -> Any:
@@ -236,31 +252,34 @@ def test_restore_loads_tables_credits_and_model(engine: Engine, restoring: Setti
         assert _ingestion_log(conn) == log
     retrieved = datetime(2026, 10, 25, 13, 31, 48, 374191, tzinfo=UTC)
     assert credits == [{**CREDIT, "retrieved": retrieved}]
-    assert (restoring.models_dir / LATEST_FILE).read_text() == "2026-10\n"
-    assert sorted(p.name for p in (restoring.models_dir / "2026-10").iterdir()) == sorted(
-        MODEL_FILES
-    )
+    # The older 2026-10 model is replaced, and nothing is left beside it.
+    assert _models(restoring) == ("2026-10\n", ["2026-10", LATEST_FILE], sorted(MODEL_FILES))
 
 
 @pytest.mark.db
-def test_restore_changes_nothing_when_installing_the_model_fails(
+def test_restore_undoes_a_partial_model_install(
     engine: Engine, restoring: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def fail(*args: Any) -> None:
-        raise OSError("disk full")
+    """The new directory is in place when pointing LATEST at it fails."""
+    write_latest = snapshot.write_latest
 
-    monkeypatch.setattr(snapshot, "install_model", fail)
+    def fail_for_new_version(models_dir: Path, version: str | None) -> None:
+        if version == "2026-10":
+            raise OSError("disk full")
+        write_latest(models_dir, version)
+
+    monkeypatch.setattr(snapshot, "write_latest", fail_for_new_version)
     with pytest.raises(OSError, match="disk full"):
         restore(restoring)
     with engine.connect() as conn:
         assert _values(conn) == ["changed", "changed"]
         restored = conn.execute(text(f"SELECT to_regclass('{SCRATCH}.restored_sources')"))
         assert restored.scalar_one() is None
-    assert (restoring.models_dir / LATEST_FILE).read_text() == "2026-09\n"
+    assert _models(restoring) == UNCHANGED_MODELS
 
 
 @pytest.mark.db
-def test_restore_points_latest_back_when_the_commit_fails(
+def test_restore_undoes_the_model_install_when_the_commit_fails(
     engine: Engine, restoring: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     @contextmanager
@@ -277,4 +296,25 @@ def test_restore_points_latest_back_when_the_commit_fails(
         restore(restoring)
     with engine.connect() as conn:
         assert _values(conn) == ["changed", "changed"]
-    assert (restoring.models_dir / LATEST_FILE).read_text() == "2026-09\n"
+    # The replaced 2026-10 model is back, not just the LATEST pointer.
+    assert _models(restoring) == UNCHANGED_MODELS
+
+
+def test_recover_install_puts_back_a_directory_left_aside(tmp_path: Path) -> None:
+    settings = get_settings().model_copy(update={"models_dir": tmp_path})
+    (tmp_path / ".2026-10.replaced").mkdir()
+    (tmp_path / ".2026-10.replaced" / "old.onnx").write_text("old")
+    recover_install(settings, "2026-10")  # interrupted between the two renames
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["2026-10", "old.onnx"]
+    (tmp_path / ".2026-10.replaced").mkdir()
+    recover_install(settings, "2026-10")  # interrupted after the install: keep the new one
+    assert sorted(p.name for p in tmp_path.rglob("*")) == ["2026-10", "old.onnx"]
+
+
+def test_write_latest_replaces_the_file_whole(tmp_path: Path) -> None:
+    write_latest(tmp_path, "2026-09")
+    write_latest(tmp_path, "2026-10")
+    assert [p.name for p in tmp_path.iterdir()] == [LATEST_FILE]
+    assert (tmp_path / LATEST_FILE).read_text() == "2026-10\n"
+    write_latest(tmp_path, None)
+    assert list(tmp_path.iterdir()) == []

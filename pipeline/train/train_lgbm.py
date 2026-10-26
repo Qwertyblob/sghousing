@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sys
 import tempfile
@@ -169,7 +170,7 @@ def run(settings: Settings) -> Path:
         directory = publish(staging, settings.models_dir / version)
     finally:
         shutil.rmtree(staging, ignore_errors=True)
-    (settings.models_dir / LATEST_FILE).write_text(version + "\n", encoding="utf-8")
+    write_latest(settings.models_dir, version)
     logger.info("Saved models to %s", directory)
     return directory
 
@@ -329,6 +330,18 @@ def train_into(directory: Path, df: pd.DataFrame, version: str, settings: Settin
         "trials": trials,
     }
     (directory / "training.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+
+
+def write_latest(models_dir: Path, version: str | None) -> None:
+    """Point models/LATEST at `version` (None removes it). The new file replaces the old in
+    one rename, so a reader never sees a partly written version."""
+    latest = models_dir / LATEST_FILE
+    if version is None:
+        latest.unlink(missing_ok=True)
+        return
+    pending = latest.with_name(f".{LATEST_FILE}.tmp")
+    pending.write_text(version + "\n", encoding="utf-8")
+    os.replace(pending, latest)
 
 
 def latest_model_dir(settings: Settings) -> Path:
